@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoStudio</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script>
+    (function () {
+      var p = localStorage.getItem("theme") || "dark";
+      var dark = p === "system" ? matchMedia("(prefers-color-scheme: dark)").matches : p === "dark";
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    })();
+  </script>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar"></aside>
+    <main id="main"><div class="empty"><div class="spinner" style="margin:40vh auto 0"></div></div></main>
+  </div>
+  <div id="toasts"></div>
+  <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+// Project website (site/) on Cloudflare — static assets only, no server code.
+// Deploy / update:  npx wrangler deploy
+{
+  "name": "autostudio",
+  "compatibility_date": "2026-10-06",
+  "assets": {
+    "directory": "./site"
+  }
+}

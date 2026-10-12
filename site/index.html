@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoStudio · 开源 AI 视频创作 Agent</title>
+<meta name="description" content="一句话剪视频：语音识别字幕、智能剪辑、音乐卡点、转场特效、AI 配音、每日自动任务。用你的 ChatGPT 订阅或任意大模型 API，开源免费，本地运行。">
+<meta property="og:title" content="AutoStudio · 开源 AI 视频创作 Agent">
+<meta property="og:description" content="一句话剪视频：字幕、剪辑、卡点、特效、配音、每日自动任务。开源免费，本地运行。">
+<meta name="theme-color" content="#0b0c10">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<style>
+:root {
+  --bg: #0b0c10; --bg2: #101218; --panel: #14161d; --panel2: #1a1d26; --border: #252935; --border2: #323746;
+  --text: #eceef3; --text2: #b3b8c6; --muted: #7c8293;
+  --v: #8b5cf6; --i: #6366f1; --c: #22d3ee; --ok: #22c55e;
+  --grad: linear-gradient(135deg, #8b5cf6 0%, #6366f1 45%, #22d3ee 100%);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Code", Consolas, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.65 var(--font); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+a { color: inherit; text-decoration: none; }
+.wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+.grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.icon { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+/* background glow */
+.glow { position: absolute; inset: -200px 0 auto 0; height: 900px; pointer-events: none; overflow: hidden; z-index: 0; }
+.glow i { position: absolute; border-radius: 50%; filter: blur(90px); opacity: .35; animation: drift 18s ease-in-out infinite alternate; }
+.glow i:nth-child(1) { width: 520px; height: 520px; background: #8b5cf6; left: 8%; top: 120px; }
+.glow i:nth-child(2) { width: 460px; height: 460px; background: #22d3ee; right: 6%; top: 60px; animation-delay: -6s; opacity: .22; }
+.glow i:nth-child(3) { width: 380px; height: 380px; background: #6366f1; left: 42%; top: 360px; animation-delay: -12s; opacity: .25; }
+@keyframes drift { to { transform: translate(60px, 40px) scale(1.1); } }
+
+/* nav */
+nav { position: sticky; top: 0; z-index: 50; backdrop-filter: blur(14px); background: rgba(11, 12, 16, .72); border-bottom: 1px solid rgba(255,255,255,.06); }
+nav .wrap { display: flex; align-items: center; gap: 28px; height: 64px; }
+.logo { display: flex; align-items: center; gap: 10px; font-weight: 750; font-size: 17px; letter-spacing: .2px; }
+.logo span { width: 32px; height: 32px; border-radius: 9px; background: var(--grad); display: grid; place-items: center; box-shadow: 0 6px 20px rgba(99,102,241,.4); }
+.logo svg { width: 16px; height: 16px; stroke: #fff; stroke-width: 2.4; fill: none; stroke-linejoin: round; }
+nav .links { display: flex; gap: 24px; font-size: 14.5px; color: var(--text2); }
+nav .links a:hover { color: var(--text); }
+nav .grow { flex: 1; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; padding: 0 22px; border-radius: 12px; font-weight: 650; font-size: 15px; border: 1px solid var(--border2); background: var(--panel2); transition: transform .15s, filter .15s, background .15s; cursor: pointer; color: var(--text); }
+.btn:hover { transform: translateY(-1px); background: #222633; }
+.btn.primary { background: var(--grad); border-color: transparent; color: #fff; box-shadow: 0 8px 26px rgba(99,102,241,.38); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.sm { height: 36px; padding: 0 16px; font-size: 14px; border-radius: 10px; }
+
+/* hero */
+header.hero { position: relative; padding: 86px 0 40px; }
+.hero .wrap { position: relative; z-index: 1; display: grid; grid-template-columns: 1.02fr 1fr; gap: 56px; align-items: center; }
+.badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px 6px 8px; border-radius: 999px; border: 1px solid rgba(139,92,246,.4); background: rgba(139,92,246,.12); font-size: 13.5px; color: #d4c8ff; margin-bottom: 22px; }
+.badge b { background: var(--grad); color: #fff; padding: 1px 9px; border-radius: 999px; font-size: 12px; }
+h1 { font-size: clamp(38px, 5.2vw, 62px); line-height: 1.12; margin: 0 0 20px; letter-spacing: -1px; font-weight: 800; }
+.lead { font-size: 18.5px; color: var(--text2); margin: 0 0 32px; max-width: 560px; }
+.cta { display: flex; gap: 14px; flex-wrap: wrap; }
+.trust { display: flex; gap: 22px; margin-top: 30px; color: var(--muted); font-size: 14px; flex-wrap: wrap; }
+.trust span { display: inline-flex; align-items: center; gap: 7px; }
+.trust .icon { width: 17px; height: 17px; color: var(--ok); }
+
+/* app mock */
+.mock { background: linear-gradient(180deg, #151821, #111319); border: 1px solid var(--border2); border-radius: 18px; box-shadow: 0 40px 90px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.03) inset; overflow: hidden; }
+.mock-bar { display: flex; align-items: center; gap: 7px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: #12141b; }
+.mock-bar i { width: 11px; height: 11px; border-radius: 50%; background: #2c303c; }
+.mock-bar .t { flex: 1; text-align: center; font-size: 12.5px; color: var(--muted); }
+.mock-bar .model { font-size: 11.5px; padding: 3px 9px; border-radius: 7px; border: 1px solid var(--border2); color: var(--text2); }
+.mock-body { padding: 18px; height: 456px; overflow: hidden; display: flex; flex-direction: column; gap: 11px; font-size: 13.5px; }
+.m-user { align-self: flex-end; max-width: 82%; background: #232734; border: 1px solid var(--border); padding: 9px 13px; border-radius: 14px 14px 4px 14px; }
+.m-ai { display: flex; gap: 10px; }
+.m-ai .av { width: 26px; height: 26px; border-radius: 8px; background: var(--grad); flex: none; display: grid; place-items: center; }
+.m-ai .av svg { width: 14px; height: 14px; stroke: #fff; stroke-width: 2.2; fill: none; }
+.m-ai .b { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.tool { border: 1px solid var(--border); background: #161922; border-radius: 10px; overflow: hidden; animation: pop .35s ease-out both; }
+.tool .h { display: flex; align-items: center; gap: 9px; padding: 7px 10px; }
+.tool .ti { width: 22px; height: 22px; border-radius: 6px; background: rgba(139,92,246,.16); color: #a78bfa; display: grid; place-items: center; }
+.tool .ti .icon { width: 13px; height: 13px; }
+.tool .n { font-weight: 650; font-size: 12.5px; }
+.tool .s { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tool .st { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+.tool .st.ok { color: var(--ok); }
+.tool .p { height: 2px; background: #22262f; }
+.tool .p i { display: block; height: 100%; width: 0; background: var(--grad); transition: width .5s; }
+.spin { width: 11px; height: 11px; border: 2px solid #333847; border-top-color: var(--c); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pop { from { opacity: 0; transform: translateY(6px); } }
+.m-text { animation: pop .35s ease-out both; color: var(--text2); }
+.m-text b { color: var(--text); }
+.m-video { border-radius: 10px; overflow: hidden; border: 1px solid var(--border); animation: pop .4s ease-out both; height: 120px; position: relative; background:
+  linear-gradient(90deg, rgba(0,0,0,.35), transparent 30%, transparent 70%, rgba(0,0,0,.35)),
+  linear-gradient(135deg, #3b2b6e 0%, #1d3a5c 40%, #0f5260 70%, #2a2050 100%); }
+.m-video::after { content: "▶"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 26px; color: rgba(255,255,255,.85); }
+.m-video span { position: absolute; left: 0; right: 0; bottom: 12px; text-align: center; font-weight: 700; font-size: 13px; text-shadow: 0 1px 3px #000; }
+.m-video em { position: absolute; left: 10px; top: 8px; font-style: normal; font-size: 11px; padding: 2px 7px; border-radius: 6px; background: rgba(0,0,0,.45); }
+
+/* sections */
+section { padding: 96px 0; position: relative; }
+.sec-head { text-align: center; max-width: 720px; margin: 0 auto 54px; }
+.eyebrow { font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: #a78bfa; font-weight: 700; margin-bottom: 12px; }
+h2 { font-size: clamp(28px, 3.6vw, 42px); line-height: 1.2; margin: 0 0 16px; letter-spacing: -.5px; }
+.sec-head p { color: var(--text2); margin: 0; font-size: 17px; }
+
+.models { padding: 28px 0 0; }
+.models .row { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 12px; }
+.chip { padding: 7px 15px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,.02); color: var(--text2); font-size: 14px; }
+.models p { text-align: center; color: var(--muted); font-size: 13.5px; margin: 0 0 16px; }
+
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.card { background: linear-gradient(180deg, var(--panel), #12141a); border: 1px solid var(--border); border-radius: 18px; padding: 26px; transition: border-color .2s, transform .2s; position: relative; overflow: hidden; }
+.card:hover { border-color: rgba(139,92,246,.45); transform: translateY(-3px); }
+.card .ci { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: rgba(139,92,246,.14); color: #b9a4ff; margin-bottom: 16px; }
+.card h3 { margin: 0 0 8px; font-size: 18.5px; }
+.card p { margin: 0; color: var(--text2); font-size: 15px; }
+.card .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.card .tags span { font-size: 12px; padding: 3px 9px; border-radius: 7px; background: #1f2330; color: var(--text2); border: 1px solid var(--border); }
+.card.wide { grid-column: span 2; }
+.card.hl { background: radial-gradient(120% 140% at 0% 0%, rgba(139,92,246,.18), transparent 50%), linear-gradient(180deg, var(--panel), #12141a); }
+
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; counter-reset: s; }
+.step { padding: 28px; border-radius: 18px; border: 1px dashed var(--border2); position: relative; }
+.step::before { counter-increment: s; content: counter(s); position: absolute; top: -16px; left: 24px; width: 34px; height: 34px; border-radius: 10px; background: var(--grad); display: grid; place-items: center; font-weight: 800; color: #fff; }
+.step h3 { margin: 6px 0 8px; font-size: 18px; }
+.step p { margin: 0; color: var(--text2); font-size: 15px; }
+.step code, .faq code { font-family: var(--mono); font-size: 13px; background: #1d212c; padding: 2px 6px; border-radius: 6px; color: #d4d8e4; }
+
+.connect { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.connect .card { padding: 32px; }
+.connect .card h3 { font-size: 22px; display: flex; align-items: center; gap: 10px; }
+.connect ul { margin: 14px 0 0; padding-left: 0; list-style: none; color: var(--text2); font-size: 15px; }
+.connect li { padding: 5px 0 5px 26px; position: relative; }
+.connect li::before { content: ""; position: absolute; left: 4px; top: 13px; width: 10px; height: 6px; border-left: 2px solid var(--ok); border-bottom: 2px solid var(--ok); transform: rotate(-45deg); }
+
+.term { background: #0d0f14; border: 1px solid var(--border2); border-radius: 16px; overflow: hidden; max-width: 820px; margin: 0 auto; box-shadow: 0 30px 70px rgba(0,0,0,.45); }
+.term .bar { display: flex; align-items: center; gap: 7px; padding: 11px 16px; border-bottom: 1px solid var(--border); }
+.term .bar i { width: 11px; height: 11px; border-radius: 50%; background: #2c303c; }
+.term .bar span { flex: 1; text-align: center; font-size: 12.5px; color: var(--muted); }
+.term pre { margin: 0; padding: 22px 24px; font: 14.5px/1.85 var(--mono); color: #d6dae5; overflow-x: auto; }
+.term .c { color: #6b7385; }
+.term .p { color: #8b5cf6; user-select: none; }
+.term .g { color: #4ade80; }
+.copy { background: none; border: 1px solid var(--border2); color: var(--text2); border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.copy:hover { color: var(--text); }
+.note { text-align: center; color: var(--muted); font-size: 14px; margin-top: 18px; }
+
+.privacy { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.privacy div { padding: 22px; border-radius: 16px; background: var(--panel); border: 1px solid var(--border); }
+.privacy b { display: block; margin: 10px 0 6px; font-size: 16px; }
+.privacy p { margin: 0; color: var(--text2); font-size: 14px; }
+.privacy .icon { width: 24px; height: 24px; color: #a78bfa; }
+
+.faq { max-width: 820px; margin: 0 auto; }
+.faq details { border-bottom: 1px solid var(--border); padding: 18px 4px; }
+.faq summary { cursor: pointer; font-weight: 650; font-size: 17px; list-style: none; display: flex; justify-content: space-between; gap: 16px; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; color: var(--muted); font-weight: 400; font-size: 22px; line-height: 1; transition: transform .2s; }
+.faq details[open] summary::after { transform: rotate(45deg); }
+.faq p { color: var(--text2); margin: 12px 0 0; font-size: 15.5px; }
+
+.final { text-align: center; padding: 110px 0; }
+.final .box { border-radius: 26px; padding: 64px 24px; border: 1px solid rgba(139,92,246,.35); background: radial-gradient(80% 120% at 50% 0%, rgba(139,92,246,.22), rgba(34,211,238,.06) 60%, transparent), var(--bg2); }
+.final h2 { font-size: clamp(30px, 4vw, 46px); }
+.final p { color: var(--text2); margin: 0 0 30px; font-size: 17px; }
+footer { border-top: 1px solid var(--border); padding: 34px 0 46px; color: var(--muted); font-size: 13.5px; }
+footer .wrap { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+
+.reveal { opacity: 0; transform: translateY(18px); transition: opacity .7s ease, transform .7s ease; }
+.reveal.in { opacity: 1; transform: none; }
+
+@media (max-width: 980px) {
+  .hero .wrap { grid-template-columns: 1fr; }
+  .grid { grid-template-columns: 1fr 1fr; }
+  .card.wide { grid-column: span 2; }
+  .privacy { grid-template-columns: 1fr 1fr; }
+  nav .links { display: none; }
+}
+@media (max-width: 640px) {
+  .grid, .steps, .connect, .privacy { grid-template-columns: 1fr; }
+  .card.wide { grid-column: auto; }
+  section { padding: 70px 0; }
+  header.hero { padding-top: 56px; }
+  .mock-body { height: 420px; }
+  .steps { gap: 30px; }
+}
+@media (prefers-reduced-motion: reduce) { .glow i, .spin { animation: none; } .reveal { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z"/></symbol>
+  <symbol id="i-captions" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M7 15h4M14 15h3M7 11h2M12 11h5"/></symbol>
+  <symbol id="i-scissors" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"/></symbol>
+  <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M12 3 13.9 8.1 19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
+  <symbol id="i-split" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24"><circle cx="13.5" cy="6.5" r="1"/><circle cx="17.5" cy="10.5" r="1"/><circle cx="8.5" cy="7.5" r="1"/><circle cx="6.5" cy="12.5" r="1"/><path d="M12 2a10 10 0 0 0 0 20c.9 0 1.6-.7 1.6-1.6 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.7-1.6 1.6-1.6H16a6 6 0 0 0 6-6c0-4.9-4.5-8.6-10-8.6z"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.3 8 11 4.6-1.7 8-6 8-11V5z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></symbol>
+  <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="18" rx="2.5"/><path d="M7 3v18M17 3v18M2 8h5M2 16h5M17 8h5M17 16h5M2 12h20"/></symbol>
+  <symbol id="i-gh" viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></symbol>
+</svg>
+
+<nav>
+  <div class="wrap">
+    <a class="logo" href="#"><span><svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg></span>AutoStudio</a>
+    <div class="links"><a href="#features">功能</a><a href="#how">工作方式</a><a href="#connect">接入模型</a><a href="#start">快速开始</a><a href="#faq">常见问题</a></div>
+    <div class="grow"></div>
+    <a class="btn sm" data-repo href="https://github.com/jindinghe123-tech/autocliper" target="_blank" rel="noopener"><svg class="icon"><use href="#i-gh"/></svg>GitHub</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="glow"><i></i><i></i><i></i></div>
+  <div class="wrap">
+    <div>
+      <div class="badge"><b>开源</b> 支持 GPT-6 · Claude · Gemini · DeepSeek · 通义千问</div>
+      <h1>一句话，<br><span class="grad">剪出你想要的视频</span></h1>
+      <p class="lead">AutoStudio 是一个会动手的 AI 视频创作 Agent：先看懂你的素材，再自己剪辑、配字幕、卡点配乐、加转场特效和 AI 配音，最后检查成片——你只需要说出想要的效果。</p>
+      <div class="cta">
+        <a class="btn primary" href="#start"><svg class="icon"><use href="#i-zap"/></svg>免费开始使用</a>
+        <a class="btn" href="#features">看看它能做什么</a>
+      </div>
+      <div class="trust">
+        <span><svg class="icon"><use href="#i-check"/></svg>MIT 开源</span>
+        <span><svg class="icon"><use href="#i-check"/></svg>本地运行，素材不上传</span>
+        <span><svg class="icon"><use href="#i-check"/></svg>可用 ChatGPT 订阅</span>
+      </div>
+    </div>
+    <div class="mock" aria-hidden="true">
+      <div class="mock-bar"><i></i><i></i><i></i><div class="t">AutoStudio</div><div class="model">GPT-6.1-Sol</div></div>
+      <div class="mock-body" id="demo"></div>
+    </div>
+  </div>
+</header>
+
+<div class="models wrap reveal">
+  <p>接入你喜欢的大模型</p>
+  <div class="row">
+    <span class="chip">ChatGPT 订阅</span><span class="chip">OpenAI</span><span class="chip">Claude</span><span class="chip">Gemini</span>
+    <span class="chip">DeepSeek</span><span class="chip">通义千问</span><span class="chip">Kimi</span><span class="chip">智谱 GLM</span>
+    <span class="chip">豆包</span><span class="chip">硅基流动</span><span class="chip">OpenRouter</span><span class="chip">Ollama 本地模型</span>
+  </div>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="eyebrow">52 个专业工具</div>
+      <h2>从素材到成片，<span class="grad">Agent 全程自己完成</span></h2>
+      <p>不是给建议的聊天机器人。它会调用 ffmpeg、语音识别、配音引擎等工具真正把活干完，并实时显示每一步的进度和产出。</p>
+    </div>
+    <div class="grid">
+      <div class="card wide hl reveal">
+        <div class="ci"><svg class="icon"><use href="#i-eye"/></svg></div>
+        <h3>真正看懂视频，而不是照图写话</h3>
+        <p>自动切分镜头，分析每个镜头的运动强度、音量和台词，找出高光时刻；需要时逐帧查看任意时间点前后的画面，确认切点、排查黑帧和穿帮。配置 Gemini 还能原生“观看”视频（画面 + 声音）。</p>
+        <div class="tags"><span>镜头故事板</span><span>运动 / 音量分析</span><span>高光时刻</span><span>逐帧细看</span><span>Gemini 原生看视频</span></div>
+      </div>
+      <div class="card reveal">
+        <div class="ci"><svg class="icon"><use href="#i-captions"/></svg></div>
+        <h3>字幕：识别、校对、烧录</h3>
+        <p>本地 Whisper 语音识别、逐词时间轴；Agent 通读修正错别字和专有名词，翻译成双语，再用好看的样式烧录。附带可视化字幕编辑器。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ci"><svg class="icon"><use href="#i-scissors"/></svg></div>
+        <h3>智能剪辑</h3>
+        <p>一键剪掉停顿和气口，按台词删口误，镜头切分、拼接、变速慢动作，横屏转竖屏（模糊背景填充）。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ci"><svg class="icon"><use href="#i-film"/></svg></div>
+        <h3>时间线合成引擎</h3>
+        <p>一次渲染完整短视频：多片段、图片推镜、标题卡、文字动画、配乐、配音、字幕、片头片尾淡入淡出。</p>
+        <div class="tags"><span>40 种转场</span><span>Ken Burns</span><span>打字机字幕</span></div>
+      </div>
+      <div class="card reveal">
+        <div class="ci"><svg class="icon"><use href="#i-music"/></svg></div>
+        <h3>音乐卡点 & 智能配乐</h3>
+        <p>分析 BPM 和鼓点，让每个剪辑点踩在节拍上；有人说话时背景音乐自动压低，响度一键标准化。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ci"><svg class="icon"><use href="#i-palette"/></svg></div>
+        <h3>34 种特效滤镜</h3>
+        <p>电影感宽银幕、青橙色调、复古胶片、赛博朋克、梦幻柔光、推镜、晃动、故障风、RGB 分离、回旋播放、自定义 LUT……</p>
+      </div>
+      <div class="card reveal">
+        <div class="ci"><svg class="icon"><use href="#i-split"/></svg></div>
+        <h3>分屏 / 画中画</h3>
+        <p>左右、上下、宫格、画中画、反应视频布局，一句话做出 Before / After 对比。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ci"><svg class="icon"><use href="#i-mic"/></svg></div>
+        <h3>AI 配音，自动对齐字幕</h3>
+        <p>解说男声、热血解说、温柔女声、东北老妹等热门音色；支持火山引擎豆包语音、GPT-SoVITS 声音克隆和任意 TTS 接口。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ci"><svg class="icon"><use href="#i-clock"/></svg></div>
+        <h3>每日自动任务</h3>
+        <p>“每天早上 9 点整理热点做成简报”“有新视频就自动加字幕”——定时运行，结果推送到飞书、钉钉、企业微信、Telegram。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how" style="background: var(--bg2)">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="eyebrow">工作方式</div>
+      <h2>三步出片</h2>
+      <p>像跟剪辑师沟通一样，只描述结果，过程交给 Agent。</p>
+    </div>
+    <div class="steps">
+      <div class="step reveal"><h3>拖入素材</h3><p>把视频、图片、音乐拖进对话框，或者直接给它一个 B 站 / YouTube 链接。</p></div>
+      <div class="step reveal"><h3>说出想要的效果</h3><p>例如：<code>剪成 30 秒竖屏精华，开头放个钩子标题，音乐卡点，加中文字幕</code>。</p></div>
+      <div class="step reveal"><h3>Agent 看懂、剪辑、自检</h3><p>它先分析镜头和台词，再规划、剪辑、配乐配音，渲染后回看关键位置，有问题自己修正。</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="connect">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="eyebrow">两种接入方式</div>
+      <h2>用你已有的，<span class="grad">不用多花钱</span></h2>
+    </div>
+    <div class="connect">
+      <div class="card hl reveal">
+        <h3><svg class="icon"><use href="#i-zap"/></svg>ChatGPT 订阅登录</h3>
+        <p>已经有 ChatGPT Plus / Pro？直接登录账户，用订阅额度驱动 Agent，不需要 API Key。</p>
+        <ul><li>与 Codex CLI 相同的官方登录流程</li><li>自动获取你账户可用的最新模型</li><li>推理强度可调，最高到 ultra</li></ul>
+      </div>
+      <div class="card reveal">
+        <h3><svg class="icon"><use href="#i-key"/></svg>任意大模型 API</h3>
+        <p>填入 API Key 即可，按 token 计费；国内模型直连，也支持本地 Ollama 完全离线。</p>
+        <ul><li>OpenAI、Claude、Gemini、DeepSeek、通义、Kimi、智谱、豆包…</li><li>添加后自动拉取最新模型列表</li><li>任意 OpenAI 兼容接口</li></ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="start" style="background: var(--bg2)">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="eyebrow">快速开始</div>
+      <h2>三行命令跑起来</h2>
+      <p>需要 Python 3.10+。ffmpeg 已内置，无需单独安装。</p>
+    </div>
+    <div class="term reveal">
+      <div class="bar"><i></i><i></i><i></i><span>Terminal</span><button class="copy" id="copy">复制</button></div>
+<pre id="cmds"><span class="c"># 1. 下载</span>
+<span class="p">$ </span>git clone <span data-repo-text>https://github.com/jindinghe123-tech/autocliper</span>
+<span class="p">$ </span>cd autocliper
+
+<span class="c"># 2. 安装（含语音识别、AI 配音、视频下载）</span>
+<span class="p">$ </span>pip install -e ".[all]"
+
+<span class="c"># 3. 启动，浏览器会自动打开</span>
+<span class="p">$ </span>autostudio
+<span class="g">  ➜  http://127.0.0.1:8765</span></pre>
+    </div>
+    <p class="note reveal">Windows 用户也可以直接双击 <code style="font-family:var(--mono)">scripts/start-windows.bat</code>，首次运行会自动安装。</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="eyebrow">隐私与安全</div>
+      <h2>你的素材，留在你的电脑上</h2>
+    </div>
+    <div class="privacy">
+      <div class="reveal"><svg class="icon"><use href="#i-cpu"/></svg><b>本地运行</b><p>剪辑、渲染、语音识别都在本机完成，视频不会上传到我们的服务器——我们根本没有服务器。</p></div>
+      <div class="reveal"><svg class="icon"><use href="#i-lock"/></svg><b>密钥只存本机</b><p>API Key 和登录令牌保存在你电脑上，只会发送给你选择的模型服务商。</p></div>
+      <div class="reveal"><svg class="icon"><use href="#i-shield"/></svg><b>危险操作需批准</b><p>执行命令行前会先征求你的同意；Agent 不会删除文件，只会移到回收站。</p></div>
+      <div class="reveal"><svg class="icon"><use href="#i-code"/></svg><b>完全开源</b><p>MIT 协议，代码公开可审计。加一个新工具只需要一个装饰器。</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="faq" style="background: var(--bg2)">
+  <div class="wrap">
+    <div class="sec-head reveal"><div class="eyebrow">常见问题</div><h2>你可能想问</h2></div>
+    <div class="faq reveal">
+      <details><summary>真的免费吗？</summary><p>AutoStudio 本身完全免费开源。你需要自备大模型：用 ChatGPT 订阅登录就不额外花钱；用 API Key 则按服务商价格计费，也可以用 Ollama 跑本地模型完全免费。</p></details>
+      <details><summary>需要什么样的电脑？</summary><p>普通 Windows / macOS / Linux 电脑即可。语音识别在 CPU 上也能跑，有 NVIDIA 显卡会更快（没装 CUDA 会自动用 CPU）。</p></details>
+      <details><summary>AI 真的能“看懂”视频吗？</summary><p>主流大模型只接收图片，所以 AutoStudio 会把视频拆成镜头、分析运动和声音、转写台词，再把带时间戳的连续画面交给模型；遇到拿不准的地方还会逐帧细看。配置 Gemini 后还能用原生视频理解。</p></details>
+      <details><summary>配音能用哪些声音？</summary><p>内置 12 种热门风格音色（Edge 神经语音），也可以接入火山引擎豆包语音（剪映同款音色）、本地 GPT-SoVITS 声音克隆，或任意 OpenAI 兼容的 TTS 接口。注意：Edge 免费语音自 2026 年 10 月起在部分地区不可用，可通过代理或其它引擎替代。请只克隆你有权使用的声音。</p></details>
+      <details><summary>定时任务需要一直开着电脑吗？</summary><p>需要 AutoStudio 在运行。可以设置开机自启；错过 1 小时以内的任务会在恢复后自动补跑。</p></details>
+      <details><summary>“ChatGPT 订阅登录”是官方支持的吗？</summary><p>它使用与 OpenAI 开源的 Codex CLI 相同的登录流程，调用的是 ChatGPT 的 Codex 后端，并非公开文档化的 API，可能随 OpenAI 调整而变化。请仅用于你自己的账户并遵守 OpenAI 使用条款。AutoStudio 与 OpenAI 无关联。</p></details>
+    </div>
+  </div>
+</section>
+
+<div class="final wrap reveal">
+  <div class="box">
+    <h2>今天就让 AI <span class="grad">帮你剪片</span></h2>
+    <p>开源、免费、本地运行。</p>
+    <div class="cta" style="justify-content:center">
+      <a class="btn primary" href="#start"><svg class="icon"><use href="#i-zap"/></svg>开始使用</a>
+      <a class="btn" data-repo href="https://github.com/jindinghe123-tech/autocliper" target="_blank" rel="noopener"><svg class="icon"><use href="#i-gh"/></svg>在 GitHub 上查看</a>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div>© 2026 AutoStudio · MIT License</div>
+    <div>AutoStudio 是独立开源项目，与 OpenAI、Anthropic、Google、Microsoft、字节跳动等公司无关联。</div>
+  </div>
+</footer>
+
+<script>
+// Set this to your repository URL after publishing on GitHub; buttons and the clone command update automatically.
+const REPO_URL = "https://github.com/jindinghe123-tech/autocliper";
+
+if (REPO_URL) {
+  document.querySelectorAll("[data-repo]").forEach((a) => { a.href = REPO_URL; a.target = "_blank"; a.rel = "noopener"; });
+  document.querySelectorAll("[data-repo-text]").forEach((s) => { s.textContent = REPO_URL; });
+}
+
+document.getElementById("copy").onclick = (e) => {
+  const text = [...document.getElementById("cmds").innerText.split("\n")]
+    .filter((l) => l.startsWith("$ ")).map((l) => l.slice(2)).join("\n");
+  navigator.clipboard.writeText(text);
+  e.target.textContent = "已复制";
+  setTimeout(() => (e.target.textContent = "复制"), 1500);
+};
+
+const io = new IntersectionObserver((es) => es.forEach((x) => { if (x.isIntersecting) { x.target.classList.add("in"); io.unobserve(x.target); } }), { threshold: 0.12 });
+document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+
+// ---- animated demo conversation
+const ICON = { eye: "i-eye", scissors: "i-scissors", music: "i-music", mic: "i-mic", film: "i-film", captions: "i-captions", sparkles: "i-sparkles" };
+const SCRIPTS = [
+  { user: "把这段 20 分钟的旅行 vlog 剪成 30 秒竖屏精华，音乐卡点，加中文字幕", steps: [
+    ["eye", "看懂视频", "travel_vlog.mp4 · 86 个镜头 · 高光 6 处"],
+    ["eye", "观看片段", "03:12–03:27 · 每秒 4 帧"],
+    ["music", "节拍分析", "bgm.mp3 · 124 BPM"],
+    ["film", "合成视频", "9 个片段 · 卡点 · 9:16"],
+    ["captions", "烧录字幕", "pop 弹出动画"],
+  ], text: "完成！选了<b>日出、冲浪、夜市</b>三段高光，剪辑点全部踩在鼓点上。", video: "30 秒精华 · 9:16" },
+  { user: "给这个口播视频剪掉停顿，配上解说男声的开场白和字幕", steps: [
+    ["scissors", "剪掉静音", "去掉 41 处停顿 · 节省 1分52秒"],
+    ["captions", "语音识别", "312 条字幕 · 已校对 7 处错字"],
+    ["mic", "AI 配音", "解说男声 · 开场白 6.2 秒"],
+    ["film", "合成视频", "开场白 + 正片 · 淡入淡出"],
+  ], text: "已完成，修正了<b>“视屏→视频”</b>等 7 处错字，开场白和正片之间加了转场。", video: "口播精剪版" },
+];
+const demo = document.getElementById("demo");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const el = (html) => { const d = document.createElement("div"); d.innerHTML = html.trim(); return d.firstChild; };
+async function play(sc) {
+  demo.innerHTML = "";
+  demo.append(el(`<div class="m-user">${sc.user}</div>`));
+  await sleep(700);
+  const ai = el(`<div class="m-ai"><div class="av"><svg viewBox="0 0 24 24"><use href="#i-sparkles"/></svg></div><div class="b"></div></div>`);
+  demo.append(ai);
+  const body = ai.querySelector(".b");
+  for (const [ic, name, sum] of sc.steps) {
+    const t = el(`<div class="tool"><div class="h"><div class="ti"><svg class="icon"><use href="#${ICON[ic]}"/></svg></div><span class="n">${name}</span><span class="s">${sum}</span><span class="st"><span class="spin"></span>0%</span></div><div class="p"><i></i></div></div>`);
+    body.append(t);
+    const st = t.querySelector(".st"), bar = t.querySelector(".p i");
+    for (const p of [18, 46, 73, 100]) { await sleep(260); bar.style.width = p + "%"; if (p < 100) st.innerHTML = `<span class="spin"></span>${p}%`; }
+    st.className = "st ok"; st.innerHTML = '<svg class="icon" style="width:14px;height:14px"><use href="#i-check"/></svg>';
+    t.querySelector(".p").remove();
+  }
+  await sleep(300);
+  body.append(el(`<div class="m-text">${sc.text}</div>`));
+  await sleep(250);
+  body.append(el(`<div class="m-video"><em>MP4</em><span>${sc.video}</span></div>`));
+}
+(async () => {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) { await play(SCRIPTS[0]); return; }
+  for (let i = 0; ; i = (i + 1) % SCRIPTS.length) { await play(SCRIPTS[i]); await sleep(4200); }
+})();
+</script>
+</body>
+</html>
