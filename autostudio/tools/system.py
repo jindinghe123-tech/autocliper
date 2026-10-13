@@ -253,7 +253,7 @@ def _task_view(t: dict[str, Any]) -> dict[str, Any]:
     nxt = state.scheduler.next_run(t["id"]) if state.scheduler else None
     return {"id": t["id"], "name": t["name"], "cron": t["cron"], "enabled": bool(t["enabled"]),
             "prompt": t["prompt"][:300], "webhook": bool(t.get("webhook")), "next_run": nxt,
-            "last_status": t.get("last_status")}
+            "auto_publish": bool(t.get("auto_publish")), "last_status": t.get("last_status")}
 
 
 @tool("task_create",
@@ -262,14 +262,15 @@ def _task_view(t: dict[str, Any]) -> dict[str, Any]:
       "'30 20 * * 1-5' 工作日 20:30，'0 */2 * * *' 每两小时。",
       obj(["name", "prompt", "cron"], name=s("任务名"), prompt=s("每次执行时给 agent 的完整指令（要写清楚输入在哪、输出到哪）"),
           cron=s("cron 表达式"), webhook=s("结果推送地址（可选）"),
-          allow_dangerous=boolean("是否允许执行命令行等危险操作（无人值守，默认 false）")), category="task")
+          allow_dangerous=boolean("是否允许执行命令行等危险操作（无人值守，默认 false）"),
+          auto_publish=boolean("发布到社交平台时直接发出、不等用户确认（默认 false：进入待确认队列）")), category="task")
 async def task_create(ctx: ToolContext, name: str, prompt: str, cron: str, webhook: str | None = None,
-                      allow_dangerous: bool = False) -> dict[str, Any]:
+                      allow_dangerous: bool = False, auto_publish: bool = False) -> dict[str, Any]:
     if not state.scheduler:
         raise ToolError("调度器未运行")
     state.scheduler.validate_cron(cron)
     t = state.db.create_task(name=name, prompt=prompt, cron=cron, enabled=True, webhook=webhook,
-                             allow_dangerous=allow_dangerous)
+                             allow_dangerous=allow_dangerous, auto_publish=auto_publish)
     state.scheduler.sync(t["id"])
     return {"ok": True, "task": _task_view(state.db.get_task(t["id"]) or t)}
 
@@ -279,9 +280,10 @@ async def task_list(ctx: ToolContext) -> dict[str, Any]:
     return {"tasks": [_task_view(t) for t in state.db.list_tasks()]}
 
 
-@tool("task_update", "修改定时任务（名称、指令、cron、启用/停用、webhook）。",
+@tool("task_update", "修改定时任务（名称、指令、cron、启用/停用、webhook、是否自动发布）。",
       obj(["id"], id=s("任务 id"), name=s("新名称"), prompt=s("新指令"), cron=s("新 cron"),
-          enabled=boolean("启用/停用"), webhook=s("推送地址")), category="task")
+          enabled=boolean("启用/停用"), webhook=s("推送地址"),
+          auto_publish=boolean("发布到社交平台时是否直接发出（不等用户确认）")), category="task")
 async def task_update(ctx: ToolContext, id: str, **fields: Any) -> dict[str, Any]:
     if not state.db.get_task(id):
         raise ToolError(f"任务不存在：{id}")

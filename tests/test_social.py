@@ -1,0 +1,138 @@
+"""Social publishing: content rules, account matching, the review queue and YouTube's resumable upload."""
+import asyncio
+import json
+import os
+import tempfile
+from pathlib import Path
+
+os.environ.setdefault("AUTOSTUDIO_HOME", tempfile.mkdtemp(prefix="autostudio_test_"))
+
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+
+from autostudio import social, state  # noqa: E402
+from autostudio.social import youtube as yt  # noqa: E402
+from autostudio.tools.registry import ToolContext  # noqa: E402
+from autostudio.tools.social import social_publish  # noqa: E402
+
+
+@pytest.fixture()
+def media(tmp_path: Path) -> dict[str, str]:
+    files = {"video": tmp_path / "clip.mp4", "img1": tmp_path / "a.jpg", "img2": tmp_path / "b.png"}
+    for p in files.values():
+        p.write_bytes(b"x" * 1024)
+    return {k: str(v) for k, v in files.items()}
+
+
+@pytest.fixture()
+def accounts():
+    for a in state.db.list_accounts():
+        state.db.delete_account(a["id"])
+    made = [state.db.create_account("xiaohongshu", "美食号"), state.db.create_account("xiaohongshu", "旅行号"),
+            state.db.create_account("youtube", "My Channel", {"channel_id": "UC1"}, {"refresh_token": "r"})]
+    yield made
+    for a in made:
+        state.db.delete_account(a["id"])
+
+
+def test_prepare_rules(media):
+    w: list[str] = []
+    c = social.prepare("xiaohongshu", {"video": media["video"], "title": "一" * 30, "tags": ["#美食", " 探店 ", ""]}, w)
+    assert len(c["title"]) == 20 and c["tags"] == ["美食", "探店"] and w
+    c = social.prepare("xiaohongshu", {"images": [media["img1"], media["img2"]], "title": "图文"}, [])
+    assert len(c["images"]) == 2 and c["video"] is None
+    with pytest.raises(ValueError, match="二选一"):
+        social.prepare("xiaohongshu", {"video": media["video"], "images": [media["img1"]], "title": "x"}, [])
+    with pytest.raises(ValueError, match="只能发布视频"):
+        social.prepare("youtube", {"images": [media["img1"]], "title": "x"}, [])
+    c = social.prepare("youtube", {"video": media["video"]}, [])
+    assert c["title"] == "clip" and c["privacy"] == "public"
+    with pytest.raises(ValueError, match="不存在"):
+        social.prepare("youtube", {"video": media["video"] + ".missing"}, [])
+
+
+def test_resolve_accounts(accounts):
+    xhs1, xhs2, ytc = accounts
+    assert [a["id"] for a in social.resolve_accounts(["小红书"])] == [xhs1["id"], xhs2["id"]]
+    assert [a["id"] for a in social.resolve_accounts(["旅行", "YouTube"])] == [xhs2["id"], ytc["id"]]
+    assert len(social.resolve_accounts(["全部"])) == 3
+    assert social.resolve_accounts([ytc["id"]])[0]["name"] == "My Channel"
+    with pytest.raises(ValueError, match="找不到"):
+        social.resolve_accounts(["抖音号"])
+
+
+def test_fit_tags():
+    assert yt.fit_tags(["#shorts", "a,b", "<x>"]) == ["shorts", "a b", "＜x＞"]
+    assert sum(len(t) + 1 for t in yt.fit_tags(["t" * 100] * 10)) <= yt.TAGS_MAX_CHARS + 1
+
+
+def test_publish_tool_queues_for_review(accounts, media, tmp_path):
+    session = state.db.create_session("t")
+
+    async def emit(_ev):
+        return None
+
+    ctx = ToolContext(session_id=session["id"], workspace=tmp_path, emit=emit, publish_mode="queue")
+    out = asyncio.run(social_publish(ctx, accounts=["小红书", "youtube"], video=media["video"], title="今天吃什么",
+                                     tags=["美食"], per_platform={"youtube": {"title": "What to eat today"}}))
+    assert out["ok"] and len(out["results"]) == 3 and {r["status"] for r in out["results"]} == {"待确认"}
+    posts = state.db.list_posts("pending", session_id=session["id"])
+    assert {p["content"]["title"] for p in posts} == {"今天吃什么", "What to eat today"}
+
+
+class FakeYouTube:
+    """Just enough of Google's resumable upload protocol, including one transient 503."""
+
+    def __init__(self, size: int):
+        self.size, self.got, self.failed_once, self.body = size, 0, False, None
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        if req.method == "POST" and "/videos" in req.url.path:
+            self.body = json.loads(req.content)
+            assert req.headers["X-Upload-Content-Length"] == str(self.size)
+            return httpx.Response(200, headers={"Location": "https://upload.example/session1"})
+        assert req.method == "PUT" and str(req.url) == "https://upload.example/session1"
+        cr = req.headers["Content-Range"]
+        if cr.startswith("bytes */"):
+            return httpx.Response(308, headers={"Range": f"bytes=0-{self.got - 1}"} if self.got else {})
+        start, end = (int(x) for x in cr.split(" ")[1].split("/")[0].split("-"))
+        assert start == self.got
+        if not self.failed_once and self.got > 0:
+            self.failed_once = True
+            return httpx.Response(503)
+        self.got = end + 1
+        if self.got >= self.size:
+            return httpx.Response(200, json={"id": "vid123", "status": {"privacyStatus": "private"}})
+        return httpx.Response(308, headers={"Range": f"bytes=0-{end}"})
+
+
+def test_youtube_resumable_upload(monkeypatch, tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(os.urandom(256 * 1024 * 3 + 1000))
+    fake = FakeYouTube(video.stat().st_size)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(yt, "CHUNK", 256 * 1024)
+    monkeypatch.setattr(yt.httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(fake), **kw))
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(yt.asyncio, "sleep", lambda _s: real_sleep(0))
+    seen: list[float] = []
+
+    async def token() -> str:
+        return "tok"
+
+    async def progress(f: float, _t: str) -> None:
+        seen.append(f)
+
+    res = asyncio.run(yt.upload(token, {"video": str(video), "title": "<hi>", "tags": ["#a"], "privacy": "public"}, progress))
+    assert res["url"] == "https://youtu.be/vid123" and fake.got == fake.size and fake.failed_once
+    assert fake.body["snippet"]["title"] == "＜hi＞" and fake.body["snippet"]["tags"] == ["a"]
+    assert res["warnings"] and "私享" in res["warnings"][0]   # requested public, came back private (unaudited project)
+    assert seen == sorted(seen)
+
+
+def test_task_auto_publish_column():
+    t = state.db.create_task(name="n", prompt="p", cron="0 9 * * *", auto_publish=True)
+    assert state.db.get_task(t["id"])["auto_publish"] == 1
+    state.db.update_task(t["id"], auto_publish=False)
+    assert state.db.get_task(t["id"])["auto_publish"] == 0
+    state.db.delete_task(t["id"])

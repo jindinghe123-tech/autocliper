@@ -5,7 +5,19 @@ import { enhanceCode, markdown } from "./markdown.js";
 import { previewFile } from "./preview.js";
 import { anyProviderReady, modelLabel, modelOptions, navigate, on, providerName, refreshSessions, setActive, store } from "./store.js";
 
+function publishSummary(a) {
+  const files = a.video ? [a.video] : a.images || [];
+  const lines = [`发布到：${[].concat(a.accounts || []).join("、")}`, `文件：${files.join("、")}`];
+  if (a.title) lines.push(`标题：${a.title}`);
+  if (a.description) lines.push(`正文：${a.description.length > 160 ? a.description.slice(0, 160) + "…" : a.description}`);
+  if ((a.tags || []).length) lines.push(`话题：${a.tags.map((t) => "#" + t).join(" ")}`);
+  for (const [k, v] of Object.entries(a.per_platform || {})) if (v?.title) lines.push(`${k} 标题：${v.title}`);
+  if (a.youtube_privacy) lines.push(`YouTube 可见性：${a.youtube_privacy}`);
+  return lines.join("\n");
+}
+
 export const TOOL_META = {
+  social_accounts: ["查看社交账号", "globe"], social_publish: ["发布到社交平台", "upload"], social_posts: ["发布记录", "upload"],
   media_info: ["媒体信息", "info"], video_analyze: ["看懂视频", "film"], video_watch: ["观看片段", "play"],
   video_ask: ["Gemini 看视频", "sparkles"], video_trim: ["截取片段", "scissors"], video_cut: ["剪辑片段", "scissors"],
   detect_silence: ["检测静音", "wave"], remove_silence: ["剪掉静音", "scissors"], scene_detect: ["镜头检测", "film"],
@@ -207,7 +219,7 @@ class Thread {
   approval(ev, sid) {
     const g = this.ensureGroup();
     const args = ev.arguments || {};
-    const body = args.command ? args.command : JSON.stringify(args, null, 2);
+    const body = args.command ? args.command : ev.name === "social_publish" ? publishSummary(args) : JSON.stringify(args, null, 2);
     const btns = h("div", { class: "row" });
     const el = h("div", { class: "approval" },
       h("div", { class: "row", html: icon("alert") + "<b>需要你的批准</b>" }),

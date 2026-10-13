@@ -4,6 +4,7 @@ import { showChat, stopChatView } from "./chat.js";
 import { confirmDialog, h, icon, toast } from "./dom.js";
 import { showFiles } from "./files.js";
 import { showSettings } from "./settings.js";
+import { showPublish, stopPublishView } from "./social.js";
 import { anyProviderReady, emit, modelLabel, navigate, on, providerName, refreshSessions, refreshSettings, store } from "./store.js";
 import { showSubtitles, stopSubtitleView } from "./subtitles.js";
 import { showTasks } from "./tasks.js";
@@ -12,6 +13,7 @@ const NAV = [
   ["#/chat", "chat", "对话"],
   ["#/subtitles", "captions", "字幕编辑"],
   ["#/tasks", "clock", "定时任务"],
+  ["#/publish", "upload", "发布"],
   ["#/files", "folder", "文件"],
   ["#/settings", "settings", "设置"],
 ];
@@ -90,10 +92,12 @@ async function route() {
   const params = new URLSearchParams(query);
   stopChatView();
   stopSubtitleView();
+  stopPublishView();
   try {
     switch (parts[0]) {
       case "subtitles": await showSubtitles(main, params); break;
       case "tasks": await showTasks(main); break;
+      case "publish": await showPublish(main); break;
       case "files": await showFiles(main, params); break;
       case "settings": await showSettings(main, parts[1] || "models", params); break;
       default: await showChat(main, parts[1] || null);

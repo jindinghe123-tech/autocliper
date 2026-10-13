@@ -1,4 +1,4 @@
-"""SQLite storage for sessions, messages, scheduled tasks and task runs."""
+"""SQLite storage for sessions, messages, scheduled tasks, task runs and social publishing."""
 from __future__ import annotations
 
 import json
@@ -52,9 +52,38 @@ CREATE TABLE IF NOT EXISTS task_runs (
     summary TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_task ON task_runs(task_id, id);
+CREATE TABLE IF NOT EXISTS social_accounts (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    profile TEXT,
+    secret TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS social_posts (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    status TEXT NOT NULL,
+    content TEXT NOT NULL,
+    url TEXT,
+    error TEXT,
+    note TEXT,
+    session_id TEXT,
+    task_id TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_posts_status ON social_posts(status, created_at);
 """
 
-TASK_FIELDS = ("name", "prompt", "cron", "enabled", "provider", "model", "allow_dangerous", "webhook")
+# Columns added after the first release: (table, column, definition)
+MIGRATIONS = [("tasks", "auto_publish", "INTEGER NOT NULL DEFAULT 0")]
+
+TASK_FIELDS = ("name", "prompt", "cron", "enabled", "provider", "model", "allow_dangerous", "webhook", "auto_publish")
+TASK_BOOLS = ("enabled", "allow_dangerous", "auto_publish")
 
 
 class DB:
@@ -65,6 +94,10 @@ class DB:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(SCHEMA)
+            for table, col, ddl in MIGRATIONS:
+                cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                if col not in cols:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
             self._conn.commit()
 
     def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
@@ -137,6 +170,7 @@ class DB:
         vals = {k: fields.get(k) for k in TASK_FIELDS}
         vals["enabled"] = 1 if vals.get("enabled", True) in (True, 1, None) else 0
         vals["allow_dangerous"] = 1 if vals.get("allow_dangerous") else 0
+        vals["auto_publish"] = 1 if vals.get("auto_publish") else 0
         self._exec(
             f"INSERT INTO tasks (id, {', '.join(TASK_FIELDS)}, created_at, updated_at) VALUES (?, {', '.join('?' * len(TASK_FIELDS))}, ?, ?)",
             (tid, *[vals[k] for k in TASK_FIELDS], now, now),
@@ -151,7 +185,7 @@ class DB:
 
     def update_task(self, tid: str, **fields: Any) -> dict[str, Any] | None:
         vals = {k: v for k, v in fields.items() if k in TASK_FIELDS}
-        for k in ("enabled", "allow_dangerous"):
+        for k in TASK_BOOLS:
             if k in vals:
                 vals[k] = 1 if vals[k] else 0
         if vals:
@@ -180,3 +214,93 @@ class DB:
 
     def list_task_runs(self, tid: str, limit: int = 30) -> list[dict[str, Any]]:
         return self._all("SELECT * FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT ?", (tid, limit))
+
+    # ---- social accounts ------------------------------------------------
+    # `profile` is public JSON (channel name, avatar…); `secret` holds tokens and never leaves the server.
+    def create_account(self, platform: str, name: str, profile: dict[str, Any] | None = None,
+                       secret: dict[str, Any] | None = None, account_id: str | None = None) -> dict[str, Any]:
+        aid = account_id or uuid.uuid4().hex[:10]
+        now = time.time()
+        self._exec(
+            "INSERT INTO social_accounts (id, platform, name, status, profile, secret, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (aid, platform, name, "ok", json.dumps(profile or {}, ensure_ascii=False),
+             json.dumps(secret or {}, ensure_ascii=False), now, now),
+        )
+        return self.get_account(aid)  # type: ignore[return-value]
+
+    @staticmethod
+    def _account(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if row:
+            row["profile"] = json.loads(row.get("profile") or "{}")
+            row["secret"] = json.loads(row.get("secret") or "{}")
+        return row
+
+    def get_account(self, aid: str) -> dict[str, Any] | None:
+        return self._account(self._one("SELECT * FROM social_accounts WHERE id=?", (aid,)))
+
+    def list_accounts(self, platform: str | None = None) -> list[dict[str, Any]]:
+        if platform:
+            rows = self._all("SELECT * FROM social_accounts WHERE platform=? ORDER BY created_at", (platform,))
+        else:
+            rows = self._all("SELECT * FROM social_accounts ORDER BY platform, created_at")
+        return [self._account(r) for r in rows]  # type: ignore[misc]
+
+    def update_account(self, aid: str, **fields: Any) -> dict[str, Any] | None:
+        vals: dict[str, Any] = {}
+        for k, v in fields.items():
+            if k in ("name", "status"):
+                vals[k] = v
+            elif k in ("profile", "secret"):
+                vals[k] = json.dumps(v or {}, ensure_ascii=False)
+        if vals:
+            sets = ", ".join(f"{k}=?" for k in vals)
+            self._exec(f"UPDATE social_accounts SET {sets}, updated_at=? WHERE id=?", (*vals.values(), time.time(), aid))
+        return self.get_account(aid)
+
+    def delete_account(self, aid: str) -> None:
+        self._exec("DELETE FROM social_accounts WHERE id=?", (aid,))
+
+    # ---- social posts ---------------------------------------------------
+    def create_post(self, account_id: str, platform: str, content: dict[str, Any], status: str = "pending",
+                    session_id: str | None = None, task_id: str | None = None) -> dict[str, Any]:
+        pid = uuid.uuid4().hex[:10]
+        now = time.time()
+        self._exec(
+            "INSERT INTO social_posts (id, account_id, platform, status, content, session_id, task_id, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (pid, account_id, platform, status, json.dumps(content, ensure_ascii=False), session_id, task_id, now, now),
+        )
+        return self.get_post(pid)  # type: ignore[return-value]
+
+    @staticmethod
+    def _post(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if row:
+            row["content"] = json.loads(row.get("content") or "{}")
+        return row
+
+    def get_post(self, pid: str) -> dict[str, Any] | None:
+        return self._post(self._one("SELECT * FROM social_posts WHERE id=?", (pid,)))
+
+    def list_posts(self, status: str | None = None, limit: int = 100, session_id: str | None = None) -> list[dict[str, Any]]:
+        where, args = [], []
+        if status:
+            where.append("status=?")
+            args.append(status)
+        if session_id:
+            where.append("session_id=?")
+            args.append(session_id)
+        sql = "SELECT * FROM social_posts" + (f" WHERE {' AND '.join(where)}" if where else "")
+        rows = self._all(sql + " ORDER BY created_at DESC LIMIT ?", (*args, limit))
+        return [self._post(r) for r in rows]  # type: ignore[misc]
+
+    def update_post(self, pid: str, **fields: Any) -> dict[str, Any] | None:
+        vals = {k: v for k, v in fields.items() if k in ("status", "url", "error", "note")}
+        if "content" in fields:
+            vals["content"] = json.dumps(fields["content"], ensure_ascii=False)
+        if vals:
+            sets = ", ".join(f"{k}=?" for k in vals)
+            self._exec(f"UPDATE social_posts SET {sets}, updated_at=? WHERE id=?", (*vals.values(), time.time(), pid))
+        return self.get_post(pid)
+
+    def delete_post(self, pid: str) -> None:
+        self._exec("DELETE FROM social_posts WHERE id=?", (pid,))

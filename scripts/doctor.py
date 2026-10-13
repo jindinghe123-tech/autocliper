@@ -19,6 +19,7 @@ OPTIONAL = [
     ("faster_whisper", "语音识别字幕"),
     ("edge_tts", "AI 配音"),
     ("yt_dlp", "视频下载"),
+    ("playwright", "发布到小红书"),
 ]
 
 

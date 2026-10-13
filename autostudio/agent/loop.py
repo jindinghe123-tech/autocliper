@@ -20,7 +20,7 @@ log = logging.getLogger("autostudio.agent")
 
 MAX_CONTEXT_CHARS = 350_000
 KEEP_IMAGES = 4
-DANGEROUS_PERMISSION = {"run_command": "shell"}
+DANGEROUS_PERMISSION = {"run_command": "shell", "social_publish": "publish"}
 
 
 def prepare_history(history: list[dict[str, Any]], vision: bool) -> list[dict[str, Any]]:
@@ -82,7 +82,7 @@ def _contiguous_tools(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def execute_tool(run: Run, tc: Any, settings: dict[str, Any], workspace: Path, headless: bool,
-                       allow_dangerous: bool) -> dict[str, Any]:
+                       allow_dangerous: bool, auto_publish: bool = False) -> dict[str, Any]:
     t = REGISTRY.get(tc.name)
     try:
         args = json.loads(tc.arguments or "{}")
@@ -98,10 +98,15 @@ async def execute_tool(run: Run, tc: Any, settings: dict[str, Any], workspace: P
     if args is None:
         msg["content"] = "错误：工具参数不是合法的 JSON 对象，请重新调用。"
         return msg
+    publish_mode = "now"
     if t.dangerous:
         perm_key = DANGEROUS_PERMISSION.get(t.name, "shell")
         perm = (settings.get("permissions") or {}).get(perm_key, "ask")
-        if headless:
+        if perm_key == "publish" and (headless or args.get("queue_only")):
+            # Unattended runs never publish unseen: posts wait in the review queue unless the task opted in.
+            allowed = True
+            publish_mode = "now" if headless and auto_publish and not args.get("queue_only") else "queue"
+        elif headless:
             allowed = allow_dangerous
         elif perm == "allow":
             allowed = True
@@ -114,7 +119,7 @@ async def execute_tool(run: Run, tc: Any, settings: dict[str, Any], workspace: P
             msg["denied"] = True
             return msg
     ctx = ToolContext(session_id=run.session_id, workspace=workspace, emit=run.emit, call_id=tc.id,
-                      settings=settings, headless=headless)
+                      settings=settings, headless=headless, publish_mode=publish_mode)
     try:
         result = await call_tool(t, ctx, args)
         ok = not (isinstance(result, dict) and result.get("ok") is False)
@@ -142,7 +147,7 @@ async def execute_tool(run: Run, tc: Any, settings: dict[str, Any], workspace: P
 
 
 async def run_agent(run: Run, session_id: str, text: str, attachments: list[str] | None = None, *,
-                    headless: bool = False, allow_dangerous: bool = False) -> str:
+                    headless: bool = False, allow_dangerous: bool = False, auto_publish: bool = False) -> str:
     settings = state.settings.get()
     session = state.db.get_session(session_id)
     if not session:
@@ -221,7 +226,7 @@ async def run_agent(run: Run, session_id: str, text: str, attachments: list[str]
         if not result.tool_calls:
             break
         for tc in result.tool_calls:
-            tool_msg = await execute_tool(run, tc, settings, workspace, headless, allow_dangerous)
+            tool_msg = await execute_tool(run, tc, settings, workspace, headless, allow_dangerous, auto_publish)
             state.db.add_message(session_id, tool_msg)
             history.append(tool_msg)
             await run.emit({"type": "tool_result", "message": tool_msg})

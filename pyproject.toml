@@ -9,7 +9,7 @@ description = "开源 AI Agent 工作台：用 ChatGPT 订阅或任意大模型 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-keywords = ["agent", "llm", "chatgpt", "ffmpeg", "whisper", "subtitles", "video-editing"]
+keywords = ["agent", "llm", "chatgpt", "ffmpeg", "whisper", "subtitles", "video-editing", "youtube", "xiaohongshu"]
 dependencies = [
   "fastapi>=0.110",
   "uvicorn>=0.29",
@@ -28,7 +28,8 @@ Repository = "https://github.com/jindinghe123-tech/autocliper"
 asr = ["faster-whisper>=1.1"]
 tts = ["edge-tts>=6.1"]
 download = ["yt-dlp"]
-all = ["faster-whisper>=1.1", "edge-tts>=6.1", "yt-dlp"]
+publish = ["playwright>=1.45"]
+all = ["faster-whisper>=1.1", "edge-tts>=6.1", "yt-dlp", "playwright>=1.45"]
 dev = ["ruff", "pytest"]
 
 [project.scripts]

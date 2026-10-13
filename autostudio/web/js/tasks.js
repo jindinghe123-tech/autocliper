@@ -10,6 +10,8 @@ const TEMPLATES = [
     prompt: "检查工作区 inbox/ 文件夹中的视频文件（没有该文件夹就创建并结束）。对每个视频：语音识别生成中文字幕，通读修正明显错别字，用默认样式烧录字幕，输出到 outputs/字幕版/，然后把原视频移动到 inbox/done/。最后汇报处理了哪些文件。" },
   { icon: "film", name: "每周素材整理", cron: "0 20 * * 0",
     prompt: "整理工作区 downloads/ 和 uploads/ 文件夹：按类型（视频/音频/图片/字幕/其它）统计数量和总大小，找出超过 500MB 的大文件和 30 天前的旧文件，生成一份整理建议报告保存到 reports/，不要删除任何文件。" },
+  { icon: "upload", name: "每日剪辑并发布", cron: "0 18 * * *",
+    prompt: "检查工作区 inbox/ 文件夹中的新视频（没有就创建文件夹并结束）。取最早放进去的一个：看懂内容后剪成 60 秒以内的 9:16 竖屏精华，加中文字幕和合适的背景音乐，输出到 outputs/每日发布/。然后分别写小红书文案（标题 ≤20 字、口语化、带 emoji，正文分段，5 个话题）和 YouTube Shorts 文案（英文或中文标题，简介带话题标签），发布到我的全部小红书和 YouTube 账号。最后把原视频移到 inbox/done/，汇报发布结果。" },
   { icon: "sparkles", name: "每日短视频选题", cron: "30 8 * * 1-5",
     prompt: "抓取 https://www.zhihu.com/billboard 和 https://top.baidu.com/board?tab=realtime 的热榜，结合“科技/效率工具/AI”方向，给出 5 个适合做 60 秒短视频的选题，每个包含：标题、3 秒开头钩子、内容大纲、推荐 BGM 风格。保存到 reports/选题-日期.md 并输出。" },
 ];
@@ -47,7 +49,7 @@ function parseCron(cron) {
 
 function taskForm(initial, onSaved) {
   const task = initial && !initial.isTemplate ? initial : null; // templates prefill a *new* task
-  const t = initial || { name: "", prompt: "", cron: "0 9 * * *", enabled: true, webhook: "", allow_dangerous: false };
+  const t = initial || { name: "", prompt: "", cron: "0 9 * * *", enabled: true, webhook: "", allow_dangerous: false, auto_publish: false };
   const pc = parseCron(t.cron);
   const name = h("input", { class: "input", value: t.name, placeholder: "例如：每日科技简报" });
   const prompt = h("textarea", { class: "textarea", rows: 7, placeholder: "写清楚每次要做什么、素材在哪、结果保存到哪里…" });
@@ -59,6 +61,7 @@ function taskForm(initial, onSaved) {
   const preview = h("div", { class: "hint" });
   const webhook = h("input", { class: "input", value: t.webhook || "", placeholder: "https://open.feishu.cn/open-apis/bot/v2/hook/…（可选）" });
   const dangerous = h("input", { type: "checkbox", checked: !!t.allow_dangerous });
+  const autoPublish = h("input", { type: "checkbox", checked: !!t.auto_publish });
   const modelSel = h("select", { class: "select" }, h("option", { value: "" }, "使用默认模型"),
     modelOptions().filter((o) => o.ready).map((o) => h("option", { value: `${o.pid}|${o.model}`, selected: t.provider === o.pid && t.model === o.model }, `${o.name} · ${o.model}`)));
 
@@ -95,6 +98,8 @@ function taskForm(initial, onSaved) {
     h("div", { class: "field" }, h("label", {}, "模型"), modelSel),
     h("div", { class: "field" }, h("label", {}, "结果推送 Webhook"), webhook,
       h("div", { class: "hint" }, "自动识别：飞书 / 钉钉 / 企业微信 / Telegram / Discord / Slack / Server酱 / Bark / ntfy，其它地址按通用 JSON 推送。")),
+    h("label", { class: "row small", style: { gap: "8px", cursor: "pointer", marginBottom: "8px" } }, autoPublish,
+      h("span", {}, "发布到小红书 / YouTube 时直接发出", h("span", { class: "muted" }, "（不勾选：先放进「发布 → 待确认」，你点一下才发）"))),
     h("label", { class: "row small", style: { gap: "8px", cursor: "pointer" } }, dangerous, "允许执行命令行等高风险操作（无人值守时不会询问你）"));
 
   const m = modal({
@@ -103,7 +108,7 @@ function taskForm(initial, onSaved) {
       h("button", { class: "btn primary", onclick: async () => {
         const [provider, model] = modelSel.value ? modelSel.value.split("|") : [null, null];
         const payload = { name: name.value.trim(), prompt: prompt.value.trim(), cron: cron.value.trim(), webhook: webhook.value.trim() || null,
-          allow_dangerous: dangerous.checked, provider, model, enabled: t.enabled ?? true };
+          allow_dangerous: dangerous.checked, auto_publish: autoPublish.checked, provider, model, enabled: t.enabled ?? true };
         if (!payload.name || !payload.prompt) return toast("请填写名称和指令", "err");
         try {
           if (task) await put(`/api/tasks/${task.id}`, payload); else await post("/api/tasks", payload);
@@ -160,6 +165,7 @@ export async function showTasks(main) {
           t.enabled && t.next_run ? h("span", {}, `下次：${t.next_run}`) : h("span", {}, "已停用"),
           t.last_run_at ? h("span", {}, `上次：${fmtTime(t.last_run_at)}`) : null,
           t.webhook ? h("span", { class: "tag" }, "推送") : null,
+          t.auto_publish ? h("span", { class: "tag warn" }, "自动发布") : null,
           t.model ? h("span", { class: "tag" }, t.model) : null),
         h("div", { class: "prompt" }, t.prompt),
         h("div", { class: "row wrap" },

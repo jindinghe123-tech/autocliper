@@ -39,6 +39,7 @@ CATEGORY_LABELS = {
     "web": "网络",
     "system": "系统",
     "task": "定时任务",
+    "social": "社交发布",
 }
 
 
@@ -99,6 +100,7 @@ class ToolContext:
     call_id: str = ""
     settings: dict[str, Any] = field(default_factory=dict)
     headless: bool = False
+    publish_mode: str = "now"   # social_publish: "now" or "queue" (wait for the user's approval)
     _last_progress: float = 0.0
     _tmpdirs: list[str] = field(default_factory=list)
 

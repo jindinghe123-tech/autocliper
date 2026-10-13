@@ -14,11 +14,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import state
+from . import social, state
 from .agent.loop import run_agent
 from .agent.runs import RunManager
 from .config import CHATGPT_MODELS, MEMORY_FILE, PROVIDER_PRESETS, VERSION  # noqa: F401
@@ -346,6 +346,7 @@ async def approve(sid: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
 def _task_view(t: dict[str, Any]) -> dict[str, Any]:
     return {**t, "enabled": bool(t["enabled"]), "allow_dangerous": bool(t["allow_dangerous"]),
+            "auto_publish": bool(t.get("auto_publish")),
             "next_run": state.scheduler.next_run(t["id"]) if state.scheduler else None}
 
 
@@ -404,6 +405,136 @@ async def run_task_now(tid: str) -> dict[str, Any]:
 @app.get("/api/tasks/{tid}/runs")
 async def task_runs(tid: str) -> list[dict[str, Any]]:
     return state.db.list_task_runs(tid)
+
+
+# ---------------------------------------------------------------------------
+# social publishing (accounts, review queue)
+
+OAUTH_PAGE = """<!doctype html><meta charset="utf-8"><title>{title}</title>
+<body style="font-family:system-ui;background:#0f1115;color:#e8e8ea;display:grid;place-items:center;height:100vh;margin:0">
+<div style="text-align:center;max-width:560px;padding:20px"><div style="font-size:46px">{icon}</div><h2>{title}</h2>
+<p style="opacity:.75">{msg}</p></div>{script}</body>"""
+
+
+def _social_error(e: Exception) -> HTTPException:
+    return HTTPException(400, str(e) or type(e).__name__)
+
+
+@app.get("/api/social/accounts")
+async def social_accounts() -> list[dict[str, Any]]:
+    return [social.account_view(a) for a in state.db.list_accounts()]
+
+
+@app.patch("/api/social/accounts/{aid}")
+async def social_rename(aid: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    name = str(body.get("name") or "").strip()[:40]
+    if not name:
+        raise HTTPException(400, "名称不能为空")
+    acc = state.db.update_account(aid, name=name)
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+    return social.account_view(acc)
+
+
+@app.delete("/api/social/accounts/{aid}")
+async def social_delete(aid: str) -> dict[str, Any]:
+    social.delete_account(aid)
+    return {"ok": True}
+
+
+@app.post("/api/social/accounts/{aid}/check")
+async def social_check(aid: str) -> dict[str, Any]:
+    try:
+        return await social.check_account(aid)
+    except Exception as e:  # noqa: BLE001
+        raise _social_error(e) from e
+
+
+@app.post("/api/social/xiaohongshu/login")
+async def social_xhs_login(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    try:
+        return social.start_xhs_login(body.get("account_id") or None)
+    except Exception as e:  # noqa: BLE001
+        raise _social_error(e) from e
+
+
+@app.post("/api/social/xiaohongshu/{aid}/test")
+async def social_xhs_test(aid: str) -> dict[str, Any]:
+    try:
+        return social.start_xhs_test(aid)
+    except Exception as e:  # noqa: BLE001
+        raise _social_error(e) from e
+
+
+@app.get("/api/social/jobs/{jid}")
+async def social_job(jid: str) -> dict[str, Any]:
+    job = social.JOBS.get(jid)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    return job
+
+
+@app.post("/api/social/youtube/login")
+async def social_youtube_login(request: Request, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    try:
+        return {"auth_url": social.youtube_login_url(str(request.base_url), body.get("account_id") or None)}
+    except Exception as e:  # noqa: BLE001
+        raise _social_error(e) from e
+
+
+@app.get("/oauth/youtube/callback", response_class=HTMLResponse)
+async def social_youtube_callback(state_: str = Query("", alias="state"), code: str = "", error: str = "") -> HTMLResponse:
+    # Outside /api/: Google redirects here with a cross-site top-level navigation.
+    if error or not code:
+        msg = "你取消了授权。" if error == "access_denied" else f"Google 返回错误：{error or '缺少授权码'}"
+        return HTMLResponse(OAUTH_PAGE.format(title="没有完成登录", icon="⚠️", msg=msg, script=""))
+    try:
+        acc = await social.youtube_finish_login(state_, code)
+    except Exception as e:  # noqa: BLE001
+        return HTMLResponse(OAUTH_PAGE.format(title="登录失败", icon="⚠️", msg=str(e), script=""))
+    return HTMLResponse(OAUTH_PAGE.format(
+        title="YouTube 账号已添加", icon="✓", msg=f"频道「{acc['name']}」已连接到 AutoStudio，可以关闭此页面。",
+        script="<script>setTimeout(()=>window.close(),1500)</script>"))
+
+
+@app.get("/api/social/posts")
+async def social_posts(status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    return social.list_posts(status, max(1, min(500, limit)))
+
+
+@app.post("/api/social/posts/{pid}/publish")
+async def social_post_publish(pid: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    post = state.db.get_post(pid)
+    if not post:
+        raise HTTPException(404, "发布记录不存在")
+    if post["status"] in ("publishing", "published"):
+        raise HTTPException(400, "这条内容已经发布或正在发布")
+    edits = {k: body[k] for k in ("title", "description", "tags") if k in body}
+    if edits:
+        try:
+            warnings: list[str] = []
+            content = social.prepare(post["platform"], {**post["content"], **edits}, warnings)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        state.db.update_post(pid, content=content)
+    social.publish_in_background(pid)
+    return social.post_view(state.db.get_post(pid) or post)
+
+
+@app.post("/api/social/posts/{pid}/cancel")
+async def social_post_cancel(pid: str) -> dict[str, Any]:
+    post = state.db.get_post(pid)
+    if not post:
+        raise HTTPException(404, "发布记录不存在")
+    if post["status"] != "pending":
+        raise HTTPException(400, "只能取消待确认的内容")
+    return social.post_view(state.db.update_post(pid, status="cancelled") or post)
+
+
+@app.delete("/api/social/posts/{pid}")
+async def social_post_delete(pid: str) -> dict[str, Any]:
+    state.db.delete_post(pid)
+    return {"ok": True}
 
 
 @app.post("/api/cron/preview")

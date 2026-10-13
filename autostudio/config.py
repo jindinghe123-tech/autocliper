@@ -16,6 +16,7 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 DB_FILE = DATA_DIR / "autostudio.db"
 MEMORY_FILE = DATA_DIR / "memory.md"
 CHATGPT_AUTH_FILE = DATA_DIR / "chatgpt_auth.json"
+SOCIAL_DIR = DATA_DIR / "social"   # per-account browser profiles (小红书) and publish debug screenshots
 
 # Fallback only: once signed in, the real list is fetched live from the ChatGPT/Codex model catalog
 # (see providers/catalog.py), so new models show up without code changes.
@@ -84,7 +85,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "api_model": "gpt-4o-mini-tts",
         "api_voice": "alloy",
     },
-    "permissions": {"shell": "ask"},   # ask | allow | deny
+    "permissions": {"shell": "ask", "publish": "ask"},   # ask | allow | deny
+    "social": {
+        # Your own Google Cloud OAuth client (type "Desktop app"); see the guide on the 发布 page.
+        "youtube": {"client_id": "", "client_secret": ""},
+        "xhs_show_browser": True,    # show the browser window while publishing to 小红书 (more reliable)
+    },
     "agent": {"max_steps": 60, "extra_prompt": ""},
     "ffmpeg_path": "",
 }
@@ -172,4 +178,7 @@ class Settings:
         volc = (data.get("tts") or {}).get("volc") or {}
         token = volc.pop("token", "") or ""
         volc["token_set"], volc["token_hint"] = bool(token), _hint(token)
+        yt = (data.get("social") or {}).get("youtube") or {}
+        secret = yt.pop("client_secret", "") or ""
+        yt["client_secret_set"] = bool(secret)
         return data

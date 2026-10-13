@@ -258,7 +258,7 @@ if (Test-VenvPython) {
 }
 
 # 3. Packages ----------------------------------------------------------------------------------------
-Step '3/4 安装依赖（Web 服务、ffmpeg、语音识别、AI 配音、视频下载…）'
+Step '3/4 安装依赖（Web 服务、ffmpeg、语音识别、AI 配音、视频下载、发布…）'
 function Install-Packages([string]$index, [string[]]$extras) {
   $a = @('pip', 'install', '--python', $VPy, '--default-index', $index, '-r', 'pyproject.toml')
   foreach ($e in $extras) { $a += @('--extra', $e) }
@@ -276,7 +276,7 @@ if (-not $installed) {
   foreach ($src in $Sources) {
     if (-not (Install-Packages $src.index @())) { continue }
     $installed = $true
-    foreach ($extra in 'asr', 'tts', 'download') {
+    foreach ($extra in 'asr', 'tts', 'download', 'publish') {
       if (-not (Install-Packages $src.index @($extra))) { Say "  可选功能 $extra 安装失败，已跳过" 'Yellow' }
     }
     break

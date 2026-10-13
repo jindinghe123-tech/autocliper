@@ -100,13 +100,19 @@ class TaskScheduler:
             started = time.time()
             try:
                 result["text"] = await run_agent(run, session["id"], t["prompt"], headless=True,
-                                                 allow_dangerous=bool(t.get("allow_dangerous")))
+                                                 allow_dangerous=bool(t.get("allow_dangerous")),
+                                                 auto_publish=bool(t.get("auto_publish")))
                 result["status"] = "ok"
             except Exception as e:  # noqa: BLE001
                 result["text"] = f"执行失败：{e}"
                 raise
             finally:
                 summary = (result["text"] or "").strip()[:2000]
+                pending = state.db.list_posts("pending", 50, session_id=session["id"])
+                if pending:
+                    summary += (f"\n\n📮 有 {len(pending)} 条内容等你确认发布："
+                                + "、".join(f"「{p['content'].get('title') or '无标题'}」" for p in pending[:5])
+                                + "。打开 AutoStudio →「发布」页点一下就发。")
                 state.db.finish_task_run(run_id, task_id, result["status"], summary)
                 if t.get("webhook"):
                     took = int(time.time() - started)
