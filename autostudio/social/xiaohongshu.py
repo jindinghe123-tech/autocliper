@@ -66,13 +66,18 @@ def _visible(page: Any, selector: str) -> Any | None:
     return loc.first if loc.count() else None
 
 
-PROFILE_JS = r"""() => {
-  const imgs = [...document.querySelectorAll('img')];
-  const img = imgs.find(i => /avatar/i.test(i.src + ' ' + i.className + ' ' + (i.parentElement?.className || '')));
-  const names = [...document.querySelectorAll('[class*="name" i], [class*="nick" i]')]
-    .map(e => (e.innerText || '').trim()).filter(t => t && t.length <= 30 && !t.includes('\n'));
-  const red = (document.body.innerText.match(/小红书号[:：]\s*([\w.-]+)/) || [])[1] || '';
-  return { avatar: img ? img.src : '', nickname: names[0] || '', red_id: red };
+# The creator site's own profile endpoint first; the page's top bar as a fallback.
+PROFILE_JS = r"""async () => {
+  try {
+    const r = await fetch('/api/galaxy/user/info', { credentials: 'include' });
+    const d = (await r.json()).data || {};
+    if (d.userName) return { nickname: d.userName, avatar: d.userAvatar || '', red_id: d.redId || '', user_id: d.userId || '' };
+  } catch (e) {}
+  const pick = (s) => (document.querySelector(s)?.innerText || '').trim().split('\n')[0];
+  const img = [...document.querySelectorAll('img')].find(i => /avatar/i.test(i.src));
+  const red = (document.body.innerText.match(/小红书(?:账)?号[:：]\s*([\w.-]+)/) || [])[1] || '';
+  return { nickname: pick('.account-name') || pick('.user-info') || pick('.name-box'), avatar: img ? img.src : '',
+           red_id: red, user_id: '' };
 }"""
 
 
@@ -93,20 +98,28 @@ def login(profile_dir: Path, timeout: float = 600) -> dict[str, Any]:
     def go(ctx: Any, page: Any) -> dict[str, Any]:
         page.goto(LOGIN_URL)
         deadline = time.time() + timeout
+        gone_since = 0.0
         while time.time() < deadline:
-            pages = [p for p in ctx.pages if not p.is_closed()]
+            # Edge may keep extra hidden pages (and keep running after the window is closed), so look at
+            # every page and treat "no 小红书 page left" as the user closing the window.
+            pages = [p for p in ctx.pages if not p.is_closed() and "xiaohongshu.com" in p.url]
             if not pages:
-                raise LoginCancelled("登录窗口已关闭")
-            page = pages[-1]
-            try:
-                if _logged_in(page.url) and "creator.xiaohongshu.com" in page.url:
-                    page.goto(HOME_URL)
-                    _settle(page)
-                    if _logged_in(page.url):
-                        return _profile(page)
-            except Exception as e:  # noqa: BLE001 - window closed mid-navigation
-                if "closed" in str(e).lower():
-                    raise LoginCancelled("登录窗口已关闭") from e
+                gone_since = gone_since or time.time()
+                if time.time() - gone_since > 4:
+                    raise LoginCancelled("登录窗口已关闭")
+                time.sleep(1)
+                continue
+            gone_since = 0.0
+            for page in pages:
+                try:
+                    if _logged_in(page.url) and "creator.xiaohongshu.com" in page.url:
+                        page.goto(HOME_URL)
+                        _settle(page)
+                        if _logged_in(page.url):
+                            return _profile(page)
+                except Exception as e:  # noqa: BLE001 - window closed mid-navigation
+                    if "closed" in str(e).lower():
+                        raise LoginCancelled("登录窗口已关闭") from e
             time.sleep(1)
         raise LoginCancelled("登录超时（10 分钟）")
 
@@ -221,15 +234,23 @@ def _editor(page: Any) -> Any:
     raise RuntimeError("没有找到正文输入框（小红书页面可能改版了）")
 
 
+TOPIC_ITEMS = "#creator-editor-topic-container .item"
+
+
 def _pick_topic(page: Any, tag: str) -> bool:
-    for sel in ("#creator-editor-topic-container .item", "[class*='topic'] [class*='item']",
-                "[class*='suggest'] [class*='item']", "[class*='mention'] [class*='item']"):
-        items = page.locator(sel).filter(visible=True)
-        n = items.count()
-        for i in range(min(n, 8)):
-            if tag in (items.nth(i).inner_text() or ""):
-                items.nth(i).click()
-                return True
+    """Choose the suggestion whose name is exactly `tag` (it becomes a real, linked topic)."""
+    try:
+        page.wait_for_selector(TOPIC_ITEMS, state="visible", timeout=6000)
+        page.wait_for_timeout(500)   # the list refreshes once suggestions arrive
+    except Exception:  # noqa: BLE001 - no suggestions: keep it as plain text
+        return False
+    items = page.locator(TOPIC_ITEMS).filter(visible=True)
+    for i in range(min(items.count(), 12)):
+        name = re.sub(r"\s*(新建话题|[\d.]+[万亿]?浏览)\s*$", "", items.nth(i).inner_text().replace("\n", " ")).strip()
+        if name.lstrip("#").lower() == tag.lower():
+            items.nth(i).click()
+            page.wait_for_timeout(300)
+            return True
     return False
 
 
@@ -246,10 +267,34 @@ def _fill_body(page: Any, desc: str, tags: list[str]) -> None:
             page.keyboard.press("Enter")
         for tag in tags:
             page.keyboard.type("#" + tag, delay=60)
-            page.wait_for_timeout(1500)
             if not _pick_topic(page, tag):
                 page.keyboard.type(" ")
-            page.wait_for_timeout(300)
+                if page.locator(TOPIC_ITEMS).filter(visible=True).count():
+                    page.keyboard.press("Escape")
+
+
+DISMISS_JS = r"""() => {
+  // one-off feature tips ("视频可以PK封面啦…") float above the form; close them, never touch the form itself
+  let n = 0;
+  for (const el of document.querySelectorAll('[class*="close" i]')) {
+    const box = el.closest('.tippy-box, [class*="popover" i], [class*="guide" i], [class*="tip" i]');
+    if (box && el.offsetParent !== null && !box.closest('#publish-container') && !box.querySelector('#creator-editor-topic-container')) {
+      el.click(); n++;
+    }
+  }
+  return n;
+}"""
+
+
+def _dismiss_tips(page: Any) -> None:
+    try:
+        for label in ("我知道了", "知道了", "下次再说"):
+            loc = page.get_by_text(label, exact=True).filter(visible=True)
+            for i in range(min(loc.count(), 3)):
+                loc.nth(i).click()
+        page.evaluate(DISMISS_JS)
+    except Exception:  # noqa: BLE001 - purely cosmetic
+        pass
 
 
 def _set_cover(page: Any, cover: str) -> str | None:
@@ -352,6 +397,7 @@ def publish(profile_dir: Path, post: dict[str, Any], *, headless: bool, progress
             _file_input(page, bool(video)).set_input_files(files)
             progress(0.1, "上传中…")
             _wait_upload(page, bool(video), size_mb, headless, progress)
+            _dismiss_tips(page)
             progress(0.72, "填写标题和正文…")
             _fill_title(page, post.get("title") or "")
             _fill_body(page, post.get("description") or "", post.get("tags") or [])
@@ -363,6 +409,7 @@ def publish(profile_dir: Path, post: dict[str, Any], *, headless: bool, progress
             if dry_run:
                 return {"dry_run": True, "screenshot": _shot(page, debug_dir, "dryrun"), "warnings": warnings}
             progress(0.88, "点击发布…")
+            _dismiss_tips(page)
             _click_publish(page)
             _wait_published(page, headless, progress)
             return {"url": NOTES_URL, "warnings": warnings}

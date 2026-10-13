@@ -287,7 +287,16 @@ def start_xhs_login(account_id: str | None = None) -> dict[str, Any]:
             async with _lock(aid):
                 prof = await asyncio.to_thread(xhs.login, profile_dir(aid))
             profile = {k: v for k, v in prof.items() if v}
-            if new:
+            twin = next((a for a in state.db.list_accounts("xiaohongshu") if a["id"] != aid and profile.get("user_id")
+                         and (a["profile"] or {}).get("user_id") == profile["user_id"]), None)
+            if new and twin:
+                # The same 小红书 account added again: treat it as a re-login of the existing entry.
+                async with _lock(twin["id"]):
+                    shutil.rmtree(profile_dir(twin["id"]), ignore_errors=True)
+                    profile_dir(aid).rename(profile_dir(twin["id"]))
+                state.db.update_account(twin["id"], status="ok", profile={**(twin["profile"] or {}), **profile})
+                job.update(account_id=twin["id"], note=f"「{twin['name']}」已经添加过了，已更新它的登录")
+            elif new:
                 n = len(state.db.list_accounts("xiaohongshu")) + 1
                 state.db.create_account("xiaohongshu", prof.get("nickname") or f"小红书账号 {n}", profile, account_id=aid)
             else:

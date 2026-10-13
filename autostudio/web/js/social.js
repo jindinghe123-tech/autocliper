@@ -213,7 +213,7 @@ export async function showPublish(main) {
       const j = await get(`/api/social/jobs/${job.id}`).catch(() => null);
       if (!j || j.status === "running") return;
       clearInterval(poll);
-      if (j.status === "done") { m.close(); toast("小红书账号已添加", "ok"); loadAccounts(); return; }
+      if (j.status === "done") { m.close(); toast(j.note || "小红书账号已添加", "ok"); loadAccounts(); return; }
       status.className = "notice err";
       status.innerHTML = icon("alert");
       status.append(h("div", {}, j.status === "cancelled" ? "登录窗口已关闭，没有添加账号。" : `登录失败：${j.error}`));
