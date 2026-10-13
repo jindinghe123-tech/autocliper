@@ -228,6 +228,7 @@ async def short_video_make(ctx: ToolContext, title: str, shots: list[dict[str, A
     # 3) timeline clips (hard cuts keep every line exactly on its picture)
     clips: list[dict[str, Any]] = []
     big = round(min(pr.w, pr.h) * 0.078)
+    reuse: dict[str, int] = {}   # the same clip on several shots: show a different part, with a different move
     for i, (sh, d, (path, _desc)) in enumerate(zip(shots, durations, visuals)):
         clip: dict[str, Any]
         if path and path.suffix.lower() in ff.IMAGE_EXTS:
@@ -237,8 +238,11 @@ async def short_video_make(ctx: ToolContext, title: str, shots: list[dict[str, A
             info = await ff.probe(path)
             avail = float(info.get("duration") or 0)
             extra = None
+            k = reuse.get(str(path), 0)
+            reuse[str(path)] = k + 1
             if avail >= d + 0.2:
-                st = round(min(avail - d, avail * 0.15), 3)
+                slack = avail - d
+                st = round(min(slack, avail * 0.15) if k == 0 else slack * ((0.15 + 0.43 * k) % 1.0), 3)
                 clip = {"src": str(path), "start": st, "end": round(st + d, 3), "volume": 0}
             else:
                 sp = max(0.6, avail / d) if avail else 1.0
@@ -249,6 +253,8 @@ async def short_video_make(ctx: ToolContext, title: str, shots: list[dict[str, A
         else:
             clip = {"color": "#15171d", "duration": d}
             extra = None
+        if path and path.suffix.lower() not in ff.IMAGE_EXTS and reuse.get(str(path), 0) > 1:
+            clip["effects"] = [["zoom_in", "mirror", "zoom_out"][(reuse[str(path)] - 2) % 3]]
         if sh.get("text"):
             clip["text"] = {"text": str(sh["text"])[:24], "position": "upper", "size": int(big * (1.25 if i == 0 else 1)),
                             "color": "#FFE14D" if i == 0 else "white", "animation": "slide_up", "border": max(3, big // 14)}
