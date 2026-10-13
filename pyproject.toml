@@ -26,10 +26,10 @@ Repository = "https://github.com/jindinghe123-tech/autocliper"
 
 [project.optional-dependencies]
 asr = ["faster-whisper>=1.1"]
-tts = ["edge-tts>=6.1"]
+tts = ["edge-tts>=6.1", "sherpa-onnx>=1.12"]
 download = ["yt-dlp"]
 publish = ["playwright>=1.45"]
-all = ["faster-whisper>=1.1", "edge-tts>=6.1", "yt-dlp", "playwright>=1.45"]
+all = ["faster-whisper>=1.1", "edge-tts>=6.1", "sherpa-onnx>=1.12", "yt-dlp", "playwright>=1.45"]
 dev = ["ruff", "pytest"]
 
 [project.scripts]

@@ -18,6 +18,7 @@ CORE = [
 OPTIONAL = [
     ("faster_whisper", "语音识别字幕"),
     ("edge_tts", "AI 配音"),
+    ("sherpa_onnx", "离线中文配音"),
     ("yt_dlp", "视频下载"),
     ("playwright", "发布到小红书"),
 ]

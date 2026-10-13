@@ -164,6 +164,8 @@ async def web_fetch(ctx: ToolContext, url: str, max_chars: int = 15000, include_
                              "Chrome/126.0 Safari/537.36", "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
     async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
         r = await client.get(url)
+        if r.status_code == 403 and ("robot policy" in r.text or "wikipedia.org" in url):
+            r = await client.get(url, headers={"User-Agent": "AutoStudio/0.1 (+https://github.com/jindinghe123-tech/autocliper)"})
     ctype = r.headers.get("content-type", "")
     text = r.text
     result: dict[str, Any] = {"url": str(r.url), "status": r.status_code}

@@ -4,7 +4,8 @@
 - volcengine: ByteDance 豆包语音 / 火山引擎 — the voice family behind 剪映/抖音 dubbing (trial quota, then paid)
 - gptsovits:  local GPT-SoVITS server — clone any voice from a few seconds of reference audio (free, local)
 - api:        any OpenAI-compatible /audio/speech (OpenAI, SiliconFlow CosyVoice, local CosyVoice/IndexTTS/Kokoro wrappers)
-- system:     the OS's built-in offline voice (last resort)
+- local:      offline Kokoro neural voices via sherpa-onnx (free; one-time ~150 MB model download) — see local_tts.py
+- system:     the OS's built-in offline voice (last resort; refuses when no voice speaks the text's language)
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from typing import Any
 import httpx
 
 from . import ffmpeg as ff
+from . import local_tts
 from . import subs as sublib
 
 PUNCT = "，。！？,.!?；;、：:…"
@@ -195,7 +197,7 @@ async def system_voice(text: str, out: Path, lang_hint: str = "zh") -> str:
             "Add-Type -AssemblyName System.Speech;"
             "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
             f"$v=$s.GetInstalledVoices()|?{{$_.VoiceInfo.Culture.Name -like '{lang_hint}*'}}|select -First 1;"
-            "if($v){$s.SelectVoice($v.VoiceInfo.Name)};"
+            "if(-not $v){[Console]::Error.WriteLine('NOVOICE');exit 3};$s.SelectVoice($v.VoiceInfo.Name);"
             f"$s.SetOutputToWaveFile('{wav}');"
             f"$s.Speak([IO.File]::ReadAllText('{txt}',[Text.Encoding]::UTF8));"
             "$n=$s.Voice.Name;$s.Dispose();Write-Output $n"
@@ -211,6 +213,8 @@ async def system_voice(text: str, out: Path, lang_hint: str = "zh") -> str:
     else:
         voice = f"espeak-ng ({lang_hint})"
         code, _o, err = await ff.run_proc(["espeak-ng", "-v", lang_hint, "-w", str(wav), "-f", str(txt)], timeout=600)
+    if "NOVOICE" in (err or ""):
+        raise TTSError(f"系统没有安装{'中文' if lang_hint == 'zh' else lang_hint}语音")
     if code != 0 or not wav.exists():
         raise TTSError(f"系统语音合成失败：{err[-300:]}")
     await ff.ffmpeg(["-i", str(wav), "-c:a", "libmp3lame", "-q:a", "3", str(out)])
@@ -235,7 +239,23 @@ def engine_order(cfg: dict[str, Any]) -> list[str]:
         order.append("gptsovits")
     if cfg.get("api_provider"):
         order.append("api")
+    if local_tts.available():
+        order.append("local")
     return order + ["system"]
+
+
+def _sentences(text: str, max_chars: int = 48) -> list[str]:
+    """Short pieces for the local engine: real per-sentence durations make subtitles line up."""
+    out: list[str] = []
+    for part in (p.strip() for p in re.split(r"(?<=[。！？!?；;\n])", text)):
+        while len(part) > max_chars:
+            cut = max((part.rfind(c, 0, max_chars) for c in "，,、 "), default=-1)
+            cut = cut + 1 if cut > max_chars // 3 else max_chars
+            out.append(part[:cut].strip())
+            part = part[cut:].strip()
+        if part:
+            out.append(part)
+    return out
 
 
 async def synthesize(text: str, out: Path, settings: dict[str, Any], voice: str | None = None,
@@ -279,6 +299,23 @@ async def synthesize(text: str, out: Path, settings: dict[str, Any], voice: str 
                 await openai_compatible(text, out, pcfg["base_url"], pcfg.get("api_key", ""),
                                         cfg.get("api_model") or "gpt-4o-mini-tts", v, _rate_to_speed(rate))
                 return {"engine": f"API · {v}", "errors": errors}
+            if eng == "local":
+                if not local_tts.available():
+                    raise TTSError("未安装离线配音组件（pip install sherpa-onnx）")
+                try:
+                    await local_tts.ensure_model()
+                except RuntimeError as e:
+                    raise TTSError(str(e)) from e
+                pv = local_tts.pick_voice(voice, cfg.get("persona"), cjk)
+                speed = round(pv["speed"] * (_rate_to_speed(rate) if rate else 1.0), 2)
+                wav = out.with_suffix(".src.wav")
+                timing = await asyncio.to_thread(local_tts.synth_wav, _sentences(text), wav, pv["sid"], speed)
+                try:
+                    await ff.ffmpeg(["-i", str(wav), "-c:a", "libmp3lame", "-q:a", "3", str(out)])
+                finally:
+                    wav.unlink(missing_ok=True)
+                name = next((k for k, v in local_tts.PERSONAS.items() if v["sid"] == pv["sid"]), f"音色 {pv['sid']}")
+                return {"engine": f"离线配音 · {name}", "chunks": timing, "errors": errors}
             if eng == "system":
                 used = await system_voice(text, out, "zh" if cjk else "en")
                 return {"engine": f"系统语音 · {used}", "errors": errors}

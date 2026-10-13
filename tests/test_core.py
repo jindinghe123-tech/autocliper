@@ -138,12 +138,28 @@ def test_tts_split_and_chunk_timing():
     assert cues[0].text == "你好世界" and cues[-1].start == pytest.approx(2.0) and cues[-1].end == pytest.approx(3.0)
 
 
-def test_tts_engine_order():
+def test_tts_engine_order(monkeypatch):
+    from autostudio.media import local_tts
     from autostudio.media.tts import engine_order
 
+    monkeypatch.setattr(local_tts, "available", lambda: False)
     assert engine_order({}) == ["edge", "system"]
     assert engine_order({"volc": {"appid": "1"}, "clone": {"ref_audio": "a.wav"}}) == ["edge", "volcengine", "gptsovits", "system"]
     assert engine_order({"engine": "gptsovits"}) == ["gptsovits"]
+    monkeypatch.setattr(local_tts, "available", lambda: True)
+    assert engine_order({}) == ["edge", "local", "system"]   # offline neural voice before the OS voice
+
+
+def test_local_tts_voice_and_sentences():
+    from autostudio.media import local_tts
+    from autostudio.media.tts import _sentences
+
+    assert local_tts.pick_voice("温柔女声", None, True)["sid"] == 12
+    assert local_tts.pick_voice(None, "解说男声", True)["sid"] == 72
+    assert local_tts.pick_voice("kokoro:61", None, True)["sid"] == 61
+    assert local_tts.pick_voice("zh-CN-YunxiNeural", None, False) == local_tts.DEFAULT_EN
+    parts = _sentences("第一句。第二句很长" + "，再长一点" * 12 + "！")
+    assert parts[0] == "第一句。" and all(len(p) <= 48 for p in parts) and "".join(parts).startswith("第一句。第二句很长")
 
 
 def test_shot_split_and_motion_labels():

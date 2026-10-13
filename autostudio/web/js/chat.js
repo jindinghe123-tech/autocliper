@@ -17,6 +17,7 @@ function publishSummary(a) {
 }
 
 export const TOOL_META = {
+  asset_search: ["搜索素材", "search"], asset_download: ["下载素材", "download"],
   social_accounts: ["查看社交账号", "globe"], social_publish: ["发布到社交平台", "upload"], social_posts: ["发布记录", "upload"],
   media_info: ["媒体信息", "info"], video_analyze: ["看懂视频", "film"], video_watch: ["观看片段", "play"],
   video_ask: ["Gemini 看视频", "sparkles"], video_trim: ["截取片段", "scissors"], video_cut: ["剪辑片段", "scissors"],

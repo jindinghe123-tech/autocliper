@@ -40,6 +40,7 @@ CATEGORY_LABELS = {
     "system": "系统",
     "task": "定时任务",
     "social": "社交发布",
+    "assets": "素材搜索",
 }
 
 

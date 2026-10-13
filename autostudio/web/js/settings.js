@@ -3,7 +3,7 @@ import { get, post, put, rawUrl, upload } from "./api.js";
 import { confirmDialog, h, icon, modal, toast } from "./dom.js";
 import { emit, modelOptions, navigate, providerReady, refreshSettings, setActive, store } from "./store.js";
 
-const TABS = [["models", "模型"], ["voice", "语音"], ["general", "通用"], ["tools", "工具"], ["about", "关于"]];
+const TABS = [["models", "模型"], ["voice", "语音"], ["assets", "素材"], ["general", "通用"], ["tools", "工具"], ["about", "关于"]];
 const LOGO_COLORS = { chatgpt: "#10a37f", openai: "#10a37f", anthropic: "#d97757", gemini: "#4285f4", deepseek: "#4d6bfe",
   qwen: "#615ced", moonshot: "#16191e", zhipu: "#3859ff", doubao: "#1e6fff", siliconflow: "#7c3aed", openrouter: "#6467f2", ollama: "#333", custom: "#64748b" };
 const TYPE_LABEL = { chatgpt: "ChatGPT 订阅", openai_chat: "OpenAI 兼容", openai_responses: "OpenAI Responses", anthropic: "Anthropic" };
@@ -20,7 +20,7 @@ export async function showSettings(main, tab = "models", params = new URLSearchP
   main.append(h("div", { class: "page-head" },
     h("button", { class: "btn ghost icon-only menu-btn", html: icon("menu"), onclick: () => document.getElementById("sidebar").classList.toggle("open") }),
     h("h1", {}, "设置")), h("div", { class: "page-body" }, h("div", { class: "page-narrow" }, tabs, body)));
-  const render = { models: renderModels, voice: renderVoice, general: renderGeneral, tools: renderTools, about: renderAbout }[tab] || renderModels;
+  const render = { models: renderModels, voice: renderVoice, assets: renderAssets, general: renderGeneral, tools: renderTools, about: renderAbout }[tab] || renderModels;
   render(body, params);
 }
 
@@ -340,7 +340,8 @@ function renderVoice(body) {
   // ---------------- TTS
   const ENGINES = [
     ["auto", "自动（按顺序尝试已配置的引擎）"], ["edge", "Edge 神经语音（免费）"], ["volcengine", "火山引擎 · 豆包语音（剪映/抖音同款）"],
-    ["gptsovits", "声音克隆 · GPT-SoVITS（本地免费）"], ["api", "OpenAI 兼容语音 API"], ["system", "系统自带语音（离线，效果差）"],
+    ["gptsovits", "声音克隆 · GPT-SoVITS（本地免费）"], ["api", "OpenAI 兼容语音 API"], ["local", "离线神经配音 · Kokoro（免费，本机运行）"],
+    ["system", "系统自带语音（离线，效果差）"],
   ];
   const ttsEngine = h("select", { class: "select" }, ENGINES.map(([v, l]) => h("option", { value: v, selected: (tts.engine || "auto") === v }, l)));
   let persona = tts.persona || "解说男声";
@@ -369,7 +370,7 @@ function renderVoice(body) {
       grid.append(h("div", { class: "s", style: sel ? { borderColor: "var(--accent)", background: "var(--accent-soft)" } : {},
         onclick: () => { persona = name; renderGrid(); } },
         h("button", { class: "btn sm icon-only", title: "试听", html: icon("play"),
-          onclick: (e) => { e.stopPropagation(); preview({ engine: "edge", voice: name }, e.currentTarget); } }),
+          onclick: (e) => { e.stopPropagation(); preview({ engine: ttsEngine.value === "auto" ? null : ttsEngine.value, voice: name }, e.currentTarget); } }),
         h("div", {}, h("b", {}, name, sel ? " ✓" : ""), h("span", {}, pv.desc))));
     }
   };
@@ -390,6 +391,32 @@ function renderVoice(body) {
   const ttsProv = provSel(tts.api_provider);
   const ttsModel = h("input", { class: "input", value: tts.api_model || "gpt-4o-mini-tts" });
   const ttsVoice = h("input", { class: "input", value: tts.api_voice || "alloy" });
+
+  function localSection() {
+    const box = h("div", { class: "card" });
+    const render = (st) => {
+      box.innerHTML = "";
+      const tag = !st.available ? h("span", { class: "tag err" }, "缺少组件")
+        : st.installed ? h("span", { class: "tag ok" }, "已就绪") : st.downloading ? h("span", { class: "tag accent" }, `下载中 ${Math.round((st.progress || 0) * 100)}%`)
+          : h("span", { class: "tag" }, "未下载");
+      box.append(h("div", { class: "row" }, h("b", {}, "离线神经配音（Kokoro）"), tag),
+        h("div", { class: "small muted", style: { margin: "6px 0 10px" } },
+          "在本机运行的中英文神经网络配音：免费、不联网、没有地区限制，55 个中文女声 + 45 个中文男声。",
+          "Edge 配音用不了时会自动改用它；第一次使用需要下载约 150MB 的模型（国内会自动走镜像）。"),
+        st.error ? h("div", { class: "notice err", html: icon("alert") }, h("div", {}, st.error)) : null,
+        st.available && !st.installed && !st.downloading ? h("button", { class: "btn sm primary", html: icon("download") + "现在下载模型", onclick: async () => {
+          try { render(await post("/api/tts/local/download")); poll(); } catch (e) { toast(e.message, "err"); }
+        } }) : null);
+    };
+    const poll = () => setTimeout(async () => {
+      const st = await get("/api/tts/local").catch(() => null);
+      if (!st || !box.isConnected) return;
+      render(st);
+      if (st.downloading) poll(); else if (st.installed) toast("离线配音模型已就绪", "ok");
+    }, 1500);
+    get("/api/tts/local").then((st) => { render(st); if (st.downloading) poll(); }).catch(() => {});
+    return box;
+  }
 
   async function saveTTS(quiet = false) {
     const volcPatch = { appid: volcAppid.value.trim(), voice_type: volcVoice.value.trim() };
@@ -416,6 +443,7 @@ function renderVoice(body) {
       h("div", { class: "row", style: { marginTop: "14px" } }, h("div", { class: "grow" }),
         h("button", { class: "btn sm", html: icon("play") + "用当前设置试听", onclick: (e) => preview({ voice: persona }, e.currentTarget) }),
         h("button", { class: "btn sm primary", onclick: () => saveTTS() }, "保存"))),
+    localSection(),
     section("Edge 神经语音", "免费；微软 2026-10 起在部分地区拒绝访问，可通过代理使用",
       h("div", { class: "field" }, h("label", {}, "代理"), proxy,
         h("div", { class: "hint" }, "如果试听报 403：在这里填写你的代理地址（Clash 默认 http://127.0.0.1:7890），并选择北美节点。"))),
@@ -479,6 +507,72 @@ function renderVoice(body) {
 
 // ---------------------------------------------------------------------------
 // General
+
+// ---------------------------------------------------------------------------
+// Asset libraries (stock footage / images / music / sound effects)
+
+const ASSET_KIND = { video: "视频画面", image: "图片", music: "音乐", sfx: "音效" };
+
+function renderAssets(body) {
+  body.innerHTML = "";
+  const a = store.settings.assets || {};
+  const provs = store.meta?.asset_providers || [];
+  body.append(h("p", { class: "muted", style: { marginTop: 0 } },
+    "Agent 剪视频时会自己搜索并下载素材：实拍画面、图片、背景音乐、音效，下载到工作区 assets/，并自动记录授权和署名。",
+    "不填任何 key 也能用（Openverse、Wikimedia）；免费申请下面的 key 后，素材多得多、质量也更高，每个只要一两分钟。"));
+
+  const test = async (btn, id) => {
+    btn.disabled = true; btn.innerHTML = '<div class="spinner"></div>测试中';
+    try {
+      const r = await post("/api/assets/test", { provider: id });
+      toast(r.count ? `可用，示例：${r.samples.join("、")}` : "可以连接，但这次没有搜到结果", "ok");
+    } catch (e) { toast(e.message, "err"); }
+    btn.disabled = false; btn.innerHTML = icon("zap") + "测试";
+  };
+
+  for (const p of provs) {
+    const kinds = h("span", {}, p.kinds.map((k) => h("span", { class: "tag", style: { marginLeft: "4px" } }, ASSET_KIND[k])));
+    const testBtn = h("button", { class: "btn sm", html: icon("zap") + "测试" });
+    testBtn.onclick = () => test(testBtn, p.id);
+    const card = h("div", { class: "card" });
+    const head = h("div", { class: "row wrap", style: { gap: "6px" } }, h("b", {}, p.label), kinds, h("div", { class: "grow" }),
+      p.key ? (a[`${p.key}_set`] ? h("span", { class: "tag ok" }, "已设置") : h("span", { class: "tag" }, "未设置"))
+        : h("span", { class: "tag ok" }, "免 key，已启用"));
+    card.append(head, h("div", { class: "small muted", style: { margin: "4px 0 10px" } }, p.desc));
+    if (p.key) {
+      const input = h("input", { class: "input mono", type: "password", placeholder: a[`${p.key}_set`] ? `已保存 ${a[`${p.key}_hint`] || ""}（要更换就粘贴新的）` : "粘贴 API key" });
+      const save = h("button", { class: "btn sm primary", onclick: async () => {
+        try {
+          await put("/api/settings", { assets: { [p.key]: input.value.trim() } });
+          await refreshSettings();
+          toast(input.value.trim() ? "已保存，正在测试…" : "已清除", "ok");
+          if (input.value.trim()) await test(testBtn, p.id);
+          renderAssets(body);
+        } catch (e) { toast(e.message, "err"); }
+      } }, "保存");
+      card.append(h("div", { class: "row", style: { gap: "8px" } }, input, save, a[`${p.key}_set`] ? testBtn : null),
+        h("div", { class: "hint", style: { marginTop: "6px" } },
+          h("a", { href: p.signup, target: "_blank", rel: "noopener" }, `免费申请 ${p.label} API key →`)));
+    } else {
+      card.append(h("div", { class: "row" }, testBtn));
+    }
+    body.append(card);
+  }
+
+  const commercial = h("input", { type: "checkbox", checked: a.commercial_only !== false });
+  const proxy = h("input", { class: "input mono", value: a.proxy || "", placeholder: "留空 = 自动使用系统代理，例如 http://127.0.0.1:7890" });
+  body.append(h("div", { class: "section-title" }, "选项"), h("div", { class: "card" },
+    h("label", { class: "row small", style: { gap: "10px", cursor: "pointer", marginBottom: "12px" } },
+      h("label", { class: "switch" }, commercial, h("span")),
+      h("div", {}, h("b", {}, "只搜索可商用的素材（推荐）"),
+        h("div", { class: "muted" }, "排除「仅限非商业」「禁止修改」的授权。做要发布、接广告的视频时请保持开启。"))),
+    h("div", { class: "field" }, h("label", {}, "下载素材使用的代理"), proxy),
+    h("div", { class: "row" }, h("div", { class: "grow" }), h("button", { class: "btn primary", onclick: async () => {
+      await put("/api/settings", { assets: { commercial_only: commercial.checked, proxy: proxy.value.trim() } });
+      await refreshSettings();
+      toast("已保存", "ok");
+    } }, "保存"))));
+}
 
 async function renderGeneral(body) {
   body.innerHTML = "";

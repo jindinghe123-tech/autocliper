@@ -86,6 +86,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "api_voice": "alloy",
     },
     "permissions": {"shell": "ask", "publish": "ask"},   # ask | allow | deny
+    # Royalty-free asset search (media/stock.py). Keys are optional: Openverse + Wikimedia work without any.
+    "assets": {"pexels_key": "", "pixabay_key": "", "freesound_key": "", "jamendo_client_id": "",
+               "commercial_only": True, "proxy": ""},
     "social": {
         # Your own Google Cloud OAuth client (type "Desktop app"); see the guide on the 发布 page.
         "youtube": {"client_id": "", "client_secret": ""},
@@ -181,4 +184,8 @@ class Settings:
         yt = (data.get("social") or {}).get("youtube") or {}
         secret = yt.pop("client_secret", "") or ""
         yt["client_secret_set"] = bool(secret)
+        assets = data.get("assets") or {}
+        for k in ("pexels_key", "pixabay_key", "freesound_key", "jamendo_client_id"):
+            v = assets.pop(k, "") or ""
+            assets[f"{k}_set"], assets[f"{k}_hint"] = bool(v), _hint(v)
         return data

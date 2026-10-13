@@ -22,7 +22,7 @@ from . import social, state
 from .agent.loop import run_agent
 from .agent.runs import RunManager
 from .config import CHATGPT_MODELS, MEMORY_FILE, PROVIDER_PRESETS, VERSION  # noqa: F401
-from .media import asr
+from .media import asr, stock
 from .media import ffmpeg as ff
 from .media import subs as sublib
 from .providers import ProviderError, make_provider
@@ -150,6 +150,7 @@ async def meta() -> dict[str, Any]:
         "effects": EFFECT_NAMES,
         "voices": TTS_VOICES,
         "personas": EDGE_PERSONAS,
+        "asset_providers": [{"id": k, **v} for k, v in stock.PROVIDERS.items()],
     }
 
 
@@ -537,6 +538,25 @@ async def social_post_delete(pid: str) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.post("/api/assets/test")
+async def assets_test(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    from .media import stock
+
+    prov = str(body.get("provider") or "")
+    if prov not in stock.PROVIDERS:
+        raise HTTPException(400, "未知的素材库")
+    cfg = dict(state.settings.get().get("assets") or {})
+    kind = stock.PROVIDERS[prov]["kinds"][0]
+    try:
+        items, warnings = await stock.search(cfg, kind, "nature" if kind in ("video", "image") else "happy" if kind == "music" else "click",
+                                             limit=3, sources=[prov])
+    except stock.StockError as e:
+        raise HTTPException(400, str(e)) from e
+    if warnings:
+        raise HTTPException(400, warnings[0])
+    return {"ok": True, "count": len(items), "samples": [i.get("title", "")[:40] for i in items]}
+
+
 @app.post("/api/cron/preview")
 async def cron_preview(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     import datetime as dt
@@ -697,6 +717,25 @@ async def tts_preview(body: dict[str, Any] = Body(default={})) -> dict[str, Any]
     except TTSError as e:
         raise HTTPException(400, str(e)) from e
     return {"path": str(out), "engine": r["engine"], "errors": r.get("errors") or []}
+
+
+@app.get("/api/tts/local")
+async def tts_local_status() -> dict[str, Any]:
+    from .media import local_tts
+
+    return {"available": local_tts.available(), "installed": local_tts.installed(), **local_tts.status}
+
+
+@app.post("/api/tts/local/download")
+async def tts_local_download() -> dict[str, Any]:
+    from .media import local_tts
+
+    if not local_tts.available():
+        raise HTTPException(400, "缺少离线配音组件 sherpa-onnx：重新双击 AutoStudio.bat 会自动安装")
+    if not local_tts.installed() and not local_tts.status["downloading"]:
+        local_tts.status.update(downloading=True, progress=0.0, error="")
+        asyncio.get_running_loop().create_task(local_tts.ensure_model())
+    return {"installed": local_tts.installed(), **local_tts.status}
 
 
 # ---------------------------------------------------------------------------
