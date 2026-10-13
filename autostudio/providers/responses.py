@@ -1,6 +1,7 @@
 """OpenAI Responses API — used for OpenAI API keys and for the ChatGPT-subscription (Codex) backend."""
 from __future__ import annotations
 
+import asyncio
 import json
 import platform
 import uuid
@@ -9,8 +10,8 @@ from typing import Any
 import httpx
 
 from ..config import DATA_DIR
-from .base import (TIMEOUT, Emit, Provider, ProviderError, ToolCall, TurnResult, image_data_url, iter_sse,
-                   raise_for_status)
+from .base import (TIMEOUT, TRANSIENT_STATUS, Emit, Provider, ProviderError, ToolCall, TurnResult, image_data_url,
+                   iter_sse, lean_images, raise_for_status)
 from .chatgpt_auth import chatgpt_auth
 
 CHATGPT_BASE = "https://chatgpt.com/backend-api/codex"
@@ -156,11 +157,20 @@ class ResponsesProvider(Provider):
 
     async def stream(self, system, messages, tools, emit: Emit) -> TurnResult:
         last_err: Exception | None = None
-        for attempt in range(3):
+        refresh = False
+        for attempt in range(4):
             try:
-                return await self._stream_once(system, messages, tools, emit, force_refresh=attempt > 0)
+                return await self._stream_once(system, messages, tools, emit, force_refresh=refresh)
             except _AuthExpired as e:
+                last_err, refresh = e, True
+                continue
+            except _Transient as e:
+                # nothing was streamed yet, so retrying is safe; a too-large request goes again with fewer images
                 last_err = e
+                if e.status == 507:
+                    messages = lean_images(messages)
+                if attempt < 3:
+                    await asyncio.sleep(2 * (attempt + 1))
                 continue
             except _BadInstructions as e:
                 if ResponsesProvider._codex_instructions_mode:
@@ -187,6 +197,10 @@ class ResponsesProvider(Provider):
                 if resp.status_code == 429:
                     text = (await resp.aread()).decode("utf-8", "replace")
                     raise ProviderError(f"{label} 用量已达上限或请求过快 (429)：{_err_message(text)}")
+                if resp.status_code in TRANSIENT_STATUS:
+                    text = (await resp.aread()).decode("utf-8", "replace")
+                    hint = "请求内容太大（多半是图片太多），已压缩后重试" if resp.status_code == 507 else "服务器临时故障，已自动重试"
+                    raise _Transient(resp.status_code, f"{label} 请求失败 (HTTP {resp.status_code})：{_err_message(text)}。{hint}，仍然失败，请稍后发送「继续」")
                 await raise_for_status(resp, label)
                 async for event, data in iter_sse(resp):
                     try:
@@ -231,6 +245,12 @@ class ResponsesProvider(Provider):
             if r.status_code >= 400:
                 raise ProviderError(f"获取模型列表失败 (HTTP {r.status_code}): {r.text[:300]}")
             return sort_and_filter(r.json().get("data", []))
+
+
+class _Transient(Exception):
+    def __init__(self, status: int, msg: str):
+        super().__init__(msg)
+        self.status = status
 
 
 class _AuthExpired(Exception):

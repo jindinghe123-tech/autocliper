@@ -19,7 +19,8 @@ from .runs import Run
 log = logging.getLogger("autostudio.agent")
 
 MAX_CONTEXT_CHARS = 350_000
-KEEP_IMAGES = 4
+KEEP_IMAGES = 4      # messages whose images are still sent
+MAX_IMAGES = 8       # and no more than this many images in one request
 DANGEROUS_PERMISSION = {"run_command": "shell", "social_publish": "publish"}
 
 
@@ -41,16 +42,18 @@ def prepare_history(history: list[dict[str, Any]], vision: bool) -> list[dict[st
                                   "content": "（该工具调用已被用户中断，未完成）"})
     msgs = fixed
     # 2) keep only the most recent images
-    seen = 0
+    seen = kept = 0
     for m in reversed(msgs):
         if m.get("images"):
             if not vision:
                 m["content"] = (m.get("content") or "") + "\n（附带的图片未发送：当前模型不支持图片输入）"
                 m["images"] = []
-            elif seen >= KEEP_IMAGES:
+            elif seen >= KEEP_IMAGES or kept >= MAX_IMAGES:
                 m["images"] = []
             else:
+                m["images"] = m["images"][:MAX_IMAGES - kept]
                 seen += 1
+                kept += len(m["images"])
     # 3) shrink old tool outputs if the context is huge
     total = sum(len(m.get("content") or "") for m in msgs)
     if total > MAX_CONTEXT_CHARS:

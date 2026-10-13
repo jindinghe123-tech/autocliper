@@ -11,8 +11,10 @@ Each provider converts this into its own wire format.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -22,6 +24,10 @@ import httpx
 Emit = Callable[[dict[str, Any]], Awaitable[None]]
 
 TIMEOUT = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
+# Gateway hiccups worth retrying. 507 = the request was too big for the gateway to buffer for its own retry.
+TRANSIENT_STATUS = {500, 502, 503, 504, 507, 520, 522, 524, 529}
+IMG_MAX_SIDE = 1280
+IMG_MAX_BYTES = 100_000
 
 
 class ProviderError(Exception):
@@ -91,20 +97,52 @@ async def raise_for_status(resp: httpx.Response, label: str) -> None:
     raise ProviderError(f"{label} 请求失败 (HTTP {resp.status_code}): {msg[:800]}")
 
 
-def image_data_url(path: str) -> str | None:
-    p = Path(path)
-    if not p.is_file():
-        return None
+def compact_image(p: Path) -> tuple[Path, str]:
+    """Images ride along as base64 in *every* request of a conversation, so keep each one small:
+    anything over ~100 KB (phone photos, 4K frames, big contact sheets) becomes a ≤1280 px JPEG (cached)."""
     mime = mimetypes.guess_type(p.name)[0] or "image/jpeg"
-    return f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode()}"
+    st = p.stat()
+    if st.st_size <= IMG_MAX_BYTES and mime in ("image/jpeg", "image/png", "image/webp", "image/gif"):
+        return p, mime
+    from ..config import DATA_DIR
+    from ..media.ffmpeg import CREATE_NO_WINDOW, ffmpeg_bin
+
+    key = hashlib.sha1(f"{p.resolve()}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:20]
+    out = DATA_DIR / "cache" / "img" / f"{key}.jpg"
+    if not out.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run([ffmpeg_bin(), "-y", "-v", "error", "-i", str(p), "-frames:v", "1", "-q:v", "5", "-vf",
+                            f"scale='min({IMG_MAX_SIDE},iw)':'min({IMG_MAX_SIDE},ih)':force_original_aspect_ratio=decrease",
+                            str(out)], capture_output=True, timeout=60, creationflags=CREATE_NO_WINDOW)
+        except Exception:  # noqa: BLE001 - fall back to the original file
+            pass
+        if not out.exists():
+            return p, mime
+    return out, "image/jpeg"
+
+
+def image_data_url(path: str) -> str | None:
+    got = image_b64(path)
+    return f"data:{got[0]};base64,{got[1]}" if got else None
 
 
 def image_b64(path: str) -> tuple[str, str] | None:
     p = Path(path)
     if not p.is_file():
         return None
-    mime = mimetypes.guess_type(p.name)[0] or "image/jpeg"
+    p, mime = compact_image(p)
     return mime, base64.b64encode(p.read_bytes()).decode()
+
+
+def lean_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only the most recent message's images (used when a request turned out to be too large)."""
+    out = [dict(m) for m in messages]
+    last = max((i for i, m in enumerate(out) if m.get("images")), default=-1)
+    for i, m in enumerate(out):
+        if m.get("images") and i != last:
+            m["images"] = []
+    return out
 
 
 def tool_args_obj(arguments: str) -> dict[str, Any]:

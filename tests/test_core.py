@@ -178,3 +178,50 @@ def test_tool_schemas_are_valid():
         for req in sch["parameters"]["required"]:
             assert req in sch["parameters"]["properties"], (t.name, req)
         assert len(t.description) > 5
+
+
+def test_images_are_capped_and_compressed(tmp_path):
+    import subprocess
+
+    from autostudio.agent.loop import MAX_IMAGES, prepare_history
+    from autostudio.media.ffmpeg import ffmpeg_bin
+    from autostudio.providers.base import compact_image, image_data_url, lean_images
+
+    big = tmp_path / "big.png"
+    subprocess.run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=2400x1600", "-frames:v", "1", str(big)], check=True)
+    small, mime = compact_image(big)
+    assert mime == "image/jpeg" and small != big and small.stat().st_size < big.stat().st_size
+    assert image_data_url(str(big)).startswith("data:image/jpeg;base64,")
+    tiny = tmp_path / "tiny.jpg"
+    subprocess.run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "color=red:s=64x64", "-frames:v", "1", str(tiny)], check=True)
+    assert compact_image(tiny) == (tiny, "image/jpeg")   # small enough: sent as is
+
+    msgs = [{"role": "tool", "tool_call_id": f"c{i}", "name": "t", "content": "", "images": [str(tiny)] * 3} for i in range(4)]
+    kept = [m["images"] for m in prepare_history(msgs, True)]
+    assert sum(len(x) for x in kept) == MAX_IMAGES and kept[-1] == [str(tiny)] * 3
+    assert [len(m["images"]) for m in lean_images(msgs)] == [0, 0, 0, 3]
+
+
+def test_transient_gateway_errors_are_retried_with_fewer_images(monkeypatch):
+    import asyncio
+
+    from autostudio.providers import responses
+    from autostudio.providers.base import TurnResult
+
+    calls = []
+
+    async def once(self, system, messages, tools, emit, force_refresh):
+        calls.append(sum(len(m.get("images") or []) for m in messages))
+        if len(calls) == 1:
+            raise responses._Transient(507, "too big")
+        return TurnResult(text="ok")
+
+    async def no_sleep(_s):
+        return None
+
+    monkeypatch.setattr(responses.ResponsesProvider, "_stream_once", once)
+    monkeypatch.setattr(responses.asyncio, "sleep", no_sleep)
+    p = responses.ResponsesProvider.__new__(responses.ResponsesProvider)
+    msgs = [{"role": "user", "content": "a", "images": ["x.jpg", "y.jpg"]}, {"role": "user", "content": "b", "images": ["z.jpg"]}]
+    res = asyncio.run(p.stream("sys", msgs, [], None))
+    assert res.text == "ok" and calls == [3, 1]
