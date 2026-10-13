@@ -334,7 +334,47 @@ def _set_cover(page: Any, cover: str) -> str | None:
         return f"封面设置失败（{str(e)[:60]}），已使用默认封面"
 
 
+def _shadow_text_point(page: Any, text: str) -> tuple[float, float] | None:
+    """Center of the element showing exactly `text`, looking inside *closed* shadow roots too.
+
+    The creator site renders 发布 / 暂存离开 inside <xhs-publish-btn>, a web component with a closed shadow
+    root that page scripts and Playwright selectors can't see; the DevTools protocol can (pierce=True).
+    """
+    cdp = page.context.new_cdp_session(page)
+    try:
+        doc = cdp.send("DOM.getDocument", {"depth": -1, "pierce": True})
+        hits: list[int] = []
+
+        def walk(node: dict[str, Any], parent_id: int | None) -> None:
+            if node.get("nodeType") == 3 and (node.get("nodeValue") or "").strip() == text and parent_id:
+                hits.append(parent_id)
+            for key in ("children", "shadowRoots"):
+                for child in node.get(key) or []:
+                    walk(child, node.get("nodeId"))
+
+        walk(doc["root"], None)
+        for node_id in reversed(hits):   # the publish bar comes late in the document
+            try:
+                quad = cdp.send("DOM.getBoxModel", {"nodeId": node_id})["model"]["border"]
+            except Exception:  # noqa: BLE001 - not rendered
+                continue
+            xs, ys = quad[0::2], quad[1::2]
+            if max(xs) - min(xs) > 4 and max(ys) - min(ys) > 4:
+                return (sum(xs) / 4, sum(ys) / 4)
+        return None
+    finally:
+        cdp.detach()
+
+
 def _click_publish(page: Any) -> None:
+    host = page.locator("xhs-publish-btn")
+    if host.count():
+        host.first.scroll_into_view_if_needed()
+        page.wait_for_timeout(300)
+        point = _shadow_text_point(page, "发布")
+        if point:
+            page.mouse.click(*point)
+            return
     buttons = page.locator("button").filter(visible=True)
     for i in range(buttons.count()):
         b = buttons.nth(i)
@@ -352,19 +392,36 @@ def _click_publish(page: Any) -> None:
     raise RuntimeError("没有找到「发布」按钮（小红书页面可能改版了）")
 
 
-def _wait_published(page: Any, headless: bool, progress: Progress) -> None:
+HINTS = [("手机号", "请先在小红书 App →「设置」→「账号与安全」里绑定手机号，再重新发布"),
+         ("实名", "请先在小红书 App 里完成实名认证，再重新发布"),
+         ("频繁", "发布太频繁了，过一段时间再试")]
+
+
+def _lines(page: Any) -> set[str]:
+    return {ln.strip() for ln in _text(page).splitlines() if ln.strip()}
+
+
+def _wait_published(page: Any, headless: bool, progress: Progress, before: set[str]) -> None:
+    """Wait for success; a short message that pops up after the click (a toast) and stays means refusal."""
     deadline = time.time() + 90
+    seen: dict[str, float] = {}
     while time.time() < deadline:
         _wait_human(page, headless, progress)
-        if "success" in page.url or "发布成功" in _text(page):
+        if "success" in page.url:
             return
-        time.sleep(1)
-    toast = ""
-    try:
-        toast = page.locator("[class*='toast' i], [class*='message' i], [class*='error' i]").filter(visible=True).first.inner_text(timeout=1000)
-    except Exception:  # noqa: BLE001
-        pass
-    raise RuntimeError("点击发布后没有看到「发布成功」" + (f"，页面提示：{toast.strip()[:80]}" if toast.strip() else ""))
+        now = _lines(page)
+        if "发布成功" in now or any("发布成功" in ln for ln in now - before):
+            return
+        for ln in now - before:
+            if len(ln) <= 40 and not re.fullmatch(r"[\d.%:\s]+", ln):
+                seen.setdefault(ln, time.time())
+        msgs = [ln for ln, t in seen.items() if time.time() - t > 2.5]
+        if msgs:
+            msg = "；".join(msgs[:3])
+            hint = next((h for k, h in HINTS if k in msg), "")
+            raise RuntimeError(f"小红书没有发布，页面提示：{msg}" + (f"。{hint}" if hint else ""))
+        time.sleep(0.5)
+    raise RuntimeError("点击发布后 90 秒内没有看到「发布成功」")
 
 
 def _shot(page: Any, debug_dir: Path, tag: str) -> str:
@@ -410,8 +467,9 @@ def publish(profile_dir: Path, post: dict[str, Any], *, headless: bool, progress
                 return {"dry_run": True, "screenshot": _shot(page, debug_dir, "dryrun"), "warnings": warnings}
             progress(0.88, "点击发布…")
             _dismiss_tips(page)
+            before = _lines(page)
             _click_publish(page)
-            _wait_published(page, headless, progress)
+            _wait_published(page, headless, progress, before)
             return {"url": NOTES_URL, "warnings": warnings}
         except NeedLogin:
             raise
