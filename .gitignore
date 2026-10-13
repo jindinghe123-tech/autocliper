@@ -12,3 +12,5 @@ dist/
 .DS_Store
 Thumbs.db
 .wrangler/
+.runtime/
+site/AutoStudio.zip

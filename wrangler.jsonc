@@ -1,8 +1,12 @@
 // Project website (site/) on Cloudflare — static assets only, no server code.
 // Deploy / update:  npx wrangler deploy
+// Every deploy first packs the download (site/AutoStudio.zip) from the latest commit, so commit before deploying.
 {
   "name": "autostudio",
   "compatibility_date": "2026-10-06",
+  "build": {
+    "command": "git -c core.autocrlf=false archive --format=zip --prefix=AutoStudio/ -o site/AutoStudio.zip HEAD"
+  },
   "assets": {
     "directory": "./site"
   }

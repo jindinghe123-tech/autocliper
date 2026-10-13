@@ -40,7 +40,23 @@ AutoStudio 不是“给建议”的聊天机器人，而是一个**会动手的 
 
 ## 🚀 快速开始
 
-### 1. 安装
+### 1. 下载并启动（不用敲命令）
+
+1. 下载 **[AutoStudio.zip](https://autostudio.jindinghe123.workers.dev/AutoStudio.zip)**（或本页 Code → Download ZIP），解压
+2. 启动：
+   - **Windows**：双击 `AutoStudio.bat`
+   - **macOS**：右键 `AutoStudio.command` → 打开
+   - **Linux**：`./AutoStudio.command`
+3. 首次运行会自动检查并安装所需的一切：Python 3.12、ffmpeg、语音识别、AI 配音、视频下载。装好后浏览器自动打开 <http://127.0.0.1:8765>，以后双击就能秒开
+
+不需要提前装 Python，也不需要管理员权限。所有东西都装在程序文件夹的 `.runtime/` 和 `.venv/` 里，删掉文件夹就彻底卸载。
+
+> - 中国大陆（系统时区为中国标准时间）会自动优先使用国内镜像（清华 / 阿里云 PyPI、npmmirror），官方源不通时也会自动切换。设置环境变量 `AUTOSTUDIO_MIRROR=1` / `0` 可以强制开启 / 关闭
+> - 开了系统代理（Clash、v2rayN 等）时，下载会自动走代理
+> - 更新：下载新版覆盖解压即可，启动时会自动补装新依赖
+> - Windows 提示“已保护你的电脑”：点 **更多信息 → 仍要运行**
+
+### 2. 用命令行安装（开发者）
 
 需要 Python 3.10+。
 
@@ -48,22 +64,13 @@ AutoStudio 不是“给建议”的聊天机器人，而是一个**会动手的 
 git clone https://github.com/jindinghe123-tech/autocliper.git
 cd autocliper
 pip install -e ".[all]"
+autostudio
 ```
 
 > `[all]` 包含语音识别（faster-whisper）、AI 配音（edge-tts）、视频下载（yt-dlp）。
 > 只想要核心功能：`pip install -e .`
 >
 > **FFmpeg**：已通过 `imageio-ffmpeg` 自带一个，开箱即用。如果你的系统已安装 ffmpeg（`winget install ffmpeg` / `brew install ffmpeg` / `apt install ffmpeg`），会优先使用系统版本。
-
-Windows 用户也可以直接双击 `scripts/start-windows.bat`（自动创建虚拟环境、安装依赖并启动）。
-
-### 2. 启动
-
-```bash
-autostudio
-```
-
-浏览器会自动打开 <http://127.0.0.1:8765>。
 
 ### 3. 连接大模型（二选一）
 
@@ -110,7 +117,7 @@ autostudio
 <details>
 <summary>开机自启（可选）</summary>
 
-- **Windows**：`Win+R` 输入 `shell:startup`，在打开的文件夹里放一个快捷方式，目标为 `pythonw -m autostudio --no-browser`（或 `scripts\start-windows.bat`）
+- **Windows**：`Win+R` 输入 `shell:startup`，在打开的文件夹里放一个 `AutoStudio.bat` 的快捷方式，目标末尾加上 ` --no-browser`
 - **macOS**：系统设置 → 通用 → 登录项，添加一个运行 `autostudio --no-browser` 的脚本
 - **Linux**：写一个 systemd user service，`ExecStart=autostudio --no-browser`
 
@@ -175,7 +182,7 @@ python -m autostudio --no-browser   # 修改前端后刷新浏览器即可，无
 npx wrangler deploy
 ```
 
-仓库地址写在 `site/index.html` 末尾脚本的 `REPO_URL` 常量里。
+仓库地址写在 `site/index.html` 末尾脚本的 `REPO_URL` 常量里。官网上的下载包 `AutoStudio.zip` 会在每次部署时由 `git archive` 从**最新提交**自动打包（见 `wrangler.jsonc`），所以先提交再部署。
 
 ## 🗺️ Roadmap
 
