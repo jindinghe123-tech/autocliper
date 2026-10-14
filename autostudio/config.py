@@ -94,7 +94,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "youtube": {"client_id": "", "client_secret": ""},
         "xhs_show_browser": True,    # show the browser window while publishing to 小红书 (more reliable)
     },
-    "agent": {"max_steps": 60, "extra_prompt": ""},
+    "agent": {"max_steps": 150, "extra_prompt": ""},
     "ffmpeg_path": "",
 }
 
@@ -136,6 +136,9 @@ class Settings:
             gpt["models"] = list(CHATGPT_MODELS)
             if merged.get("active", {}).get("provider") == "chatgpt" and merged["active"].get("model") in stale:
                 merged["active"]["model"] = CHATGPT_MODELS[0]
+        # 60 was the old default; making, watching and revising a video by hand needs far more steps
+        if merged.get("agent", {}).get("max_steps") == 60:
+            merged["agent"]["max_steps"] = DEFAULT_SETTINGS["agent"]["max_steps"]
         self._data = merged
 
     def save(self) -> None:

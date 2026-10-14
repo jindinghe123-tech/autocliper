@@ -566,7 +566,7 @@ async def _qc(path: Path) -> tuple[list[str], dict[str, Any]]:
       "交付成片。成片怎么做出来的都可以（时间线、studio_run 代码、ffmpeg_run……），交付关卡只看结果：\n"
       "· 这个文件（这一版）你自己用 video_watch 看过：开头、结尾，以及中间至少一处；\n"
       "· 用 review_cut 审过这一版：总编的 must_fix 都改掉了（改了就是新的一版，要重新看、重新审），"
-      "不同意的必须在 responses 里逐条说明理由；\n"
+      "不同意的在 responses 里逐条说明理由，总编会裁决理由站不站得住，站不住的仍然要改；\n"
       "· 自动检查：黑屏、无声、音量。\n"
       "通过后生成封面、发布文案，把成片放进交付文件夹。",
       obj(["video", "publish", "cover"], video=s("成片文件"), project=s("所属剪辑项目（可选，用于放置交付文件和取干净的封面画面）"),
@@ -593,13 +593,13 @@ async def deliver(ctx: ToolContext, video: str, publish: dict[str, Any], cover: 
     if len(watched) < 3:
         fails.append(f"这一版你只看了 {len(watched)} 处：开头、中间、结尾至少各看一处")
     reviews = rec.get("reviews") or []
+    must = (reviews[-1].get("must_fix") or []) if reviews else []
+    answered = [str(r).strip() for r in responses or [] if str(r).strip()]
     if not reviews:
         fails.append("这一版还没审：用 review_cut 请总编看一遍")
-    else:
-        must = reviews[-1].get("must_fix") or []
-        if must and len([r for r in responses or [] if str(r).strip()]) < len(must):
-            fails.append(f"总编对这一版提了 {len(must)} 条必须修改：改完重新渲染、重新看、重新审；"
-                         "确实不该改的，在 responses 里逐条说明理由")
+    elif must and not answered:
+        fails.append(f"总编对这一版提了 {len(must)} 条必须修改：改完重新渲染、重新看、重新审；"
+                     "确实不该改的，在 responses 里逐条说明理由（总编会裁决理由站不站得住）")
     qc_fails, stats = await _qc(src)
     fails += qc_fails
     d = tl.project_dir(ctx.workspace, project) if project else None
@@ -617,6 +617,18 @@ async def deliver(ctx: ToolContext, video: str, publish: dict[str, Any], cover: 
         fails.append("发布文案需要 title 和 description")
     if not (cover or {}).get("image") and not (cover or {}).get("title"):
         fails.append("封面需要 image（你做好的图），或 title（由工具合成）")
+    rulings: list[dict[str, Any]] = []
+    if not fails and must:      # everything else is fine: now the critic rules on the reasons for not fixing
+        from .workbench import judge_responses
+
+        rulings = await judge_responses(ctx, src, must, answered)
+        if not rulings:
+            fails.append("总编这次没能给出裁决，请再调用一次 deliver")
+        for i, m in enumerate(must, 1):
+            r = next((x for x in rulings if x.get("item") == i), None)
+            if rulings and not (r and r.get("accepted")):
+                fails.append(f"总编不接受你对第 {i} 条必须修改「{str(m.get('issue', ''))[:40]}…」的理由："
+                             f"{(r or {}).get('why') or '没有回应到这一条'}。改掉它，或给出更站得住的理由")
     if fails:
         return {"ok": False, "delivered": False, "fix_these": fails, "stats": stats}
 
@@ -657,9 +669,19 @@ async def deliver(ctx: ToolContext, video: str, publish: dict[str, Any], cover: 
                 credits.append(m.group(2))
         if credits:
             doc += ["## 素材来源（标注「需署名」的请写进简介）", *[f"- {c}" for c in credits], ""]
-    if responses:
-        doc += ["## 审片意见与回应", *[f"- {r}" for r in responses], ""]
     (out_dir / "发布文案.md").write_text("\n".join(doc), "utf-8")
+    if reviews:     # the critique stays with the project, never in the copy that gets posted
+        last = reviews[-1]
+        log = [f"# 审片记录：{src.name}", "", f"总编评分：{last.get('score', '?')} / 10", ""]
+        if last.get("template_feel"):
+            log += ["## 像不像模板", str(last["template_feel"]), ""]
+        if must:
+            log.append("## 没有修改的必须修改项")
+            for i, m in enumerate(must, 1):
+                r = next((x for x in rulings if x.get("item") == i), {})
+                log += [f"{i}. [{m.get('time', '')}] {m.get('issue', '')}", f"   - 总编裁决：{r.get('why', '')}"]
+            log += ["", "## 作者的理由", *[f"- {r}" for r in answered], ""]
+        (out_dir / "审片记录.md").write_text("\n".join(log), "utf-8")
     if p:
         p["delivered"] = {"file": str(src), "at": time.time()}
         tl.save(d, p)

@@ -583,7 +583,7 @@ async function renderGeneral(body) {
     .map(([v, l]) => h("option", { value: v, selected: (s.permissions?.code || "ask") === v }, l)));
   const shell = h("select", { class: "select" }, [["ask", "每次询问（推荐）"], ["allow", "总是允许"], ["deny", "禁止"]]
     .map(([v, l]) => h("option", { value: v, selected: (s.permissions?.shell || "ask") === v }, l)));
-  const steps = h("input", { class: "input", type: "number", min: 5, max: 300, value: s.agent?.max_steps || 60, style: { width: "120px" } });
+  const steps = h("input", { class: "input", type: "number", min: 5, max: 300, value: s.agent?.max_steps || 150, style: { width: "120px" } });
   const extra = h("textarea", { class: "textarea", rows: 4, placeholder: "例如：我的频道叫「XX 科技」，字幕统一用黄色描边字；回复尽量简短。" });
   extra.value = s.agent?.extra_prompt || "";
   const ffpath = h("input", { class: "input mono", value: s.ffmpeg_path || "", placeholder: "留空自动查找（系统 PATH 或内置 ffmpeg）" });
@@ -607,7 +607,7 @@ async function renderGeneral(body) {
         h("button", { class: "btn primary", onclick: async () => {
           try {
             await put("/api/settings", { workspace: ws.value.trim(), permissions: { shell: shell.value, code: code.value }, ffmpeg_path: ffpath.value.trim(),
-              agent: { max_steps: parseInt(steps.value, 10) || 60, extra_prompt: extra.value } });
+              agent: { max_steps: parseInt(steps.value, 10) || 150, extra_prompt: extra.value } });
             await refreshSettings();
             store.meta = await get("/api/meta");
             toast("已保存", "ok");

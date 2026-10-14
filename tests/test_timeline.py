@@ -126,8 +126,19 @@ def test_delivery_gate_needs_watching_and_review(tmp_path, monkeypatch):
     workbench._update(vid, lambda rec: rec["reviews"].append({"verdict": "revise", "must_fix": [{"issue": "x"}]}))
     r = asyncio.run(ed.deliver(ctx, "cut.mp4", pub, cover))
     assert not r["ok"] and any("必须修改" in f for f in r["fix_these"])
+    def critic_says(accepted):
+        async def judge(_ctx, _src, must, _responses):
+            return [{"item": i, "accepted": accepted, "why": "理由"} for i in range(1, len(must) + 1)]
+        return judge
+
+    monkeypatch.setattr(workbench, "judge_responses", critic_says(False))
+    r = asyncio.run(ed.deliver(ctx, "cut.mp4", pub, cover, responses=["这是风格"]))
+    assert not r["ok"] and any("不接受" in f for f in r["fix_these"])
+    monkeypatch.setattr(workbench, "judge_responses", critic_says(True))
     r = asyncio.run(ed.deliver(ctx, "cut.mp4", pub, cover, responses=["这是测试图，不需要改"]))
     assert r["ok"] and r["delivered"], r
+    assert "审片" not in (tmp_path / "outputs" / "cut_交付" / "发布文案.md").read_text("utf-8")
+    assert (tmp_path / "outputs" / "cut_交付" / "审片记录.md").exists()
     workbench.note_watch(vid, 0, 1)
     vid.write_bytes(vid.read_bytes() + b"\0")                    # a new version resets what was watched and reviewed
     assert workbench.cut_record(vid) == {"watched": [], "reviews": []}
