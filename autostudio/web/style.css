@@ -407,3 +407,11 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius
 .post-live .bar i { display: block; height: 100%; background: var(--grad); transition: width .4s; }
 .setup-steps { padding-left: 20px; margin: 0 0 16px; display: grid; gap: 8px; font-size: 13.5px; }
 @media (max-width: 640px) { .post-thumb { width: 72px; height: 96px; } }
+
+/* plan_update checklist */
+.plan-list { display: grid; gap: 3px; padding: 8px 12px 10px; font-size: 13px; }
+.plan-item { display: flex; gap: 8px; color: var(--text-2); }
+.plan-item.done { color: var(--muted); text-decoration: line-through; }
+.plan-item.doing { color: var(--text); font-weight: 600; }
+.plan-mark { width: 14px; flex: none; text-align: center; color: var(--accent-2); }
+.plan-note { margin-top: 4px; font-size: 12px; color: var(--muted); }

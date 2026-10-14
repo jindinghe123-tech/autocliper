@@ -82,6 +82,7 @@ def text_filters(ctx: ToolContext, tmp: Path, items: list[dict[str, Any]], w: in
         elif anim == "slide_left":
             x = f"({x})+{int(w * 0.08)}*max(0,1-(t-{a:.3f})/{fd * 1.4:.3f})"
         common = dict(size=size, color=it.get("color") or "white", box=bool(it.get("box")),
+                      font=ff.font_file(it["font"], bool(it.get("bold", True))) if it.get("font") else None,
                       box_color=ff.color_hex_to_ffmpeg(it.get("box_color"), "black") + "@0.55",
                       border=int(it.get("border") if it.get("border") is not None else max(2, size // 16)),
                       border_color=it.get("border_color") or "black", bold=it.get("bold", True))
@@ -209,10 +210,45 @@ def _auto_fit(info: dict[str, Any], w: int, h: int) -> str:
     return "crop" if 0.85 <= ratio <= 1.18 else "blur"
 
 
-def _fit_chain(inp: str, out: str, w: int, h: int, mode: str, tag: str) -> str:
+def _fit_chain(inp: str, out: str, w: int, h: int, mode: str, tag: str, bg: str | None = None) -> str:
     if mode == "blur":
         return ff.blur_fit_graph(inp, out, w, h, tag=tag)
-    return f"[{inp}]{ff.fit_filter(w, h, mode)}[{out}]"
+    return f"[{inp}]{ff.fit_filter(w, h, mode, ff.color_hex_to_ffmpeg(bg, 'black'))}[{out}]"
+
+
+async def join_clips(ctx: ToolContext, rendered: list[tuple[Path, float]], trans: list[tuple[str, float]], tmp: Path,
+                     fps: int, crf: int, prog: Any = None) -> tuple[Path, float]:
+    """Join normalized clips; trans[k] is the transition from clip k to k+1 ("none" = cut). → (file, length)."""
+    joined = tmp / "joined.mp4"
+    if all(n == "none" for n, _d in trans) or len(rendered) == 1:
+        lst = tmp / "list.txt"
+        lst.write_text("".join(f"file '{p.as_posix()}'\n" for p, _d in rendered), "utf-8")
+        await ff.ffmpeg(["-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(joined)])
+        return joined, sum(d for _p, d in rendered)
+    args: list[str] = []
+    for p, _d in rendered:
+        args += ["-i", str(p)]
+    parts = [f"[{i}:v]fps={fps},settb=AVTB,format=yuv420p[v{i}];[{i}:a]asettb=AVTB[a{i}]" for i in range(len(rendered))]
+    vcur, acur = "v0", "a0"
+    length = rendered[0][1]
+    for k in range(1, len(rendered)):
+        name, d = trans[k - 1]
+        dk = rendered[k][1]
+        if name == "none" or d <= 0:
+            parts.append(f"[{vcur}][v{k}]concat=n=2:v=1:a=0[vx{k}]")
+            parts.append(f"[{acur}][a{k}]concat=n=2:v=0:a=1[ax{k}]")
+            length += dk
+        else:
+            d = max(0.1, min(d, length - 0.05, dk - 0.05))
+            off = length - d
+            parts.append(f"[{vcur}][v{k}]xfade=transition={name}:duration={d:.3f}:offset={off:.3f}[vx{k}]")
+            parts.append(f"[{acur}][a{k}]acrossfade=d={d:.3f}:c1=tri:c2=tri[ax{k}]")
+            length = length + dk - d
+        vcur, acur = f"vx{k}", f"ax{k}"
+    await ff.ffmpeg([*args, *(await graph_args(";".join(parts), tmp)), "-map", f"[{vcur}]", "-map", f"[{acur}]",
+                     "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p",
+                     *ENC_A, str(joined)], progress=prog, duration=length)
+    return joined, length
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +298,7 @@ async def _render_clip(ctx: ToolContext, clip: dict[str, Any], i: int, w: int, h
             graph.append(f"[{v}]{','.join(pre)}[sp]")
             v = "sp"
         mode = clip.get("fit") or default_fit or _auto_fit(src_info, w, h)
-        graph.append(_fit_chain(v, "fit", w, h, mode, f"c{i}"))
+        graph.append(_fit_chain(v, "fit", w, h, mode, f"c{i}", clip.get("bg")))
         v = "fit"
     elif kind == "image":
         kb = (clip.get("kenburns") or "zoom_in").lower()
@@ -280,7 +316,7 @@ async def _render_clip(ctx: ToolContext, clip: dict[str, Any], i: int, w: int, h
             yexpr = f"(ih-ih/zoom)*on/{frames}"
         if kb == "none":
             mode = clip.get("fit") or "blur"
-            graph.append(_fit_chain("0:v", "fit", w, h, mode, f"c{i}"))
+            graph.append(_fit_chain("0:v", "fit", w, h, mode, f"c{i}", clip.get("bg")))
         else:
             graph.append(f"[0:v]scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase,crop={w * 2}:{h * 2},"
                          f"zoompan=z='{zexpr}':x='{xexpr}':y='{yexpr}':d=1:s={w}x{h}:fps={fps},setsar=1[fit]")
@@ -457,37 +493,7 @@ async def video_compose(ctx: ToolContext, clips: list[dict[str, Any]], output: s
 
     # 2) join with transitions
     await ctx.progress(0.64, "拼接与转场")
-    joined = tmp / "joined.mp4"
-    if all(n == "none" for n, _d in trans) or len(rendered) == 1:
-        lst = tmp / "list.txt"
-        lst.write_text("".join(f"file '{p.as_posix()}'\n" for p, _d in rendered), "utf-8")
-        await ff.ffmpeg(["-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(joined)])
-        total = sum(d for _p, d in rendered)
-    else:
-        args: list[str] = []
-        for p, _d in rendered:
-            args += ["-i", str(p)]
-        parts = [f"[{i}:v]fps={fps},settb=AVTB,format=yuv420p[v{i}];[{i}:a]asettb=AVTB[a{i}]" for i in range(len(rendered))]
-        vcur, acur = "v0", "a0"
-        length = rendered[0][1]
-        for k in range(1, len(rendered)):
-            name, d = trans[k - 1]
-            dk = rendered[k][1]
-            if name == "none" or d <= 0:
-                parts.append(f"[{vcur}][v{k}]concat=n=2:v=1:a=0[vx{k}]")
-                parts.append(f"[{acur}][a{k}]concat=n=2:v=0:a=1[ax{k}]")
-                length += dk
-            else:
-                d = max(0.1, min(d, length - 0.05, dk - 0.05))
-                off = length - d
-                parts.append(f"[{vcur}][v{k}]xfade=transition={name}:duration={d:.3f}:offset={off:.3f}[vx{k}]")
-                parts.append(f"[{acur}][a{k}]acrossfade=d={d:.3f}:c1=tri:c2=tri[ax{k}]")
-                length = length + dk - d
-            vcur, acur = f"vx{k}", f"ax{k}"
-        total = length
-        await ff.ffmpeg([*args, *(await graph_args(";".join(parts), tmp)), "-map", f"[{vcur}]", "-map", f"[{acur}]",
-                         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p",
-                         *ENC_A, str(joined)], progress=ctx.progress_cb(0.64, 0.8, "拼接与转场"), duration=total)
+    joined, total = await join_clips(ctx, rendered, trans, tmp, fps, crf, ctx.progress_cb(0.64, 0.8, "拼接与转场"))
 
     # 3) final pass: global texts / subtitles / music / voiceover / fades
     out = ctx.out_path(None, "", ".mp4", output=output) if output else ctx.out_path(Path("compose.mp4"), "", ".mp4")
@@ -505,10 +511,10 @@ async def video_compose(ctx: ToolContext, clips: list[dict[str, Any]], output: s
     if sub_src:
         style = dict(subtitles) if isinstance(subtitles, dict) else {}
         cues = sublib.load(ctx.resolve(sub_src, must_exist=True))
-        style.setdefault("font", ff.default_font_name())
+        fd = ff.fonts_dir_for(style.get("font"))
+        style["font"] = ff.font_name(style.get("font"))
         ass = tmp / "subs.ass"
         sublib.save(ass, cues, width=w, height=h, style=style)
-        fd = ff.fonts_dir()
         vparts.append(f"ass={ff.filter_escape_path(ass)}" + (f":fontsdir={ff.filter_escape_path(fd)}" if fd else ""))
     if fade_in:
         vparts.append(f"fade=t=in:st=0:d={fade_in}")
@@ -978,11 +984,14 @@ async def audio_visualize(ctx: ToolContext, input: str, style: str = "wave", bac
       obj(["source", "title"], source=s("视频或图片"), title=s("大标题（可用 \\n 换行）"), subtitle=s("副标题"),
           time=time_s("从视频的哪一秒取帧，默认 1"), size=s("尺寸/比例，默认与源相同，如 1080x1920、3:4"),
           title_color=s("标题颜色，默认 #FFE14D"), style=s("outline 描边 / block 色块", enum=["outline", "block"]),
-          position=s("标题位置 top/center/bottom，默认 bottom"), output=s("输出路径(.jpg/.png)，可省略")),
+          position=s("标题位置 top/center/bottom，默认 bottom"),
+          font=s("字体：黑体 / 雅黑 / 等线 / 细体 / 楷体 / 宋体 / 仿宋，默认雅黑"),
+          text_color=s("block 色块样式里的文字颜色，默认黑色"), output=s("输出路径(.jpg/.png)，可省略")),
       category="creative")
 async def make_cover(ctx: ToolContext, source: str, title: str, subtitle: str | None = None, time: Any = 1,
                      size: str | None = None, title_color: str = "#FFE14D", style: str = "outline",
-                     position: str = "bottom", output: str | None = None) -> dict[str, Any]:
+                     position: str = "bottom", font: str | None = None, text_color: str = "black",
+                     output: str | None = None) -> dict[str, Any]:
     src = ctx.resolve(source, must_exist=True)
     info = await ff.probe(src)
     W, H = ff.parse_size(size, size, fallback=(ff.even(info.get("width") or 1080), ff.even(info.get("height") or 1920)))
@@ -997,18 +1006,19 @@ async def make_cover(ctx: ToolContext, source: str, title: str, subtitle: str | 
     filters = [ff.fit_filter(W, H, "crop")]
     if position == "bottom":
         filters.append(f"drawbox=x=0:y={int(H * 0.55)}:w=iw:h={int(H * 0.45)}:color=black@0.35:t=fill")
+    ffont = ff.font_file(font, True) if font else None
     if style == "block":
-        filters.append(drawtext(ctx, tmp, title, size=tsize, color="black", x="(w-text_w)/2", y=ty, box=True,
-                                box_color=ff.color_hex_to_ffmpeg(title_color) + "@0.95", shadow=False))
+        filters.append(drawtext(ctx, tmp, title, size=tsize, color=text_color, x="(w-text_w)/2", y=ty, box=True,
+                                box_color=ff.color_hex_to_ffmpeg(title_color) + "@0.95", shadow=False, font=ffont))
     else:
         filters.append(drawtext(ctx, tmp, title, size=tsize, color=title_color, x="(w-text_w)/2", y=ty,
-                                border=max(4, tsize // 10), border_color="black"))
+                                border=max(4, tsize // 10), border_color="black", font=ffont))
     if subtitle:
         sy = f"{int(H * 0.08) + block_h + 30}" if position == "top" else f"h-{int(H * 0.09)}-text_h"
         if position == "center":
             sy = f"(h+{block_h})/2+30"
         filters.append(drawtext(ctx, tmp, subtitle, size=int(tsize * 0.45), color="white", x="(w-text_w)/2", y=sy,
-                                border=3))
+                                border=3, font=ffont))
     out = ctx.out_path(src, "_cover", ".jpg", output=output)
     await ff.ffmpeg([*inp, "-frames:v", "1", "-vf", ",".join(filters), "-q:v", "2", str(out)])
     return media_result(ctx, out, size=f"{W}x{H}", images=[str(out)])

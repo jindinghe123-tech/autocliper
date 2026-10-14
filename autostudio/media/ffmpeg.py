@@ -269,6 +269,81 @@ def default_font_file(bold: bool = False) -> str | None:
     ])
 
 
+# Font families a video style can ask for → (Windows files, macOS files, Linux files, name for ASS subtitles).
+FONT_FAMILIES: dict[str, tuple[list[str], list[str], list[str], str]] = {
+    "黑体": (["simhei.ttf", "msyhbd.ttc"], ["/System/Library/Fonts/STHeiti Medium.ttc"],
+             ["/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"], "SimHei"),
+    "雅黑": (["msyhbd.ttc", "msyh.ttc"], ["/System/Library/Fonts/PingFang.ttc"],
+             ["/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"], "Microsoft YaHei"),
+    "细体": (["msyhl.ttc", "Dengl.ttf", "msyh.ttc"], ["/System/Library/Fonts/PingFang.ttc"],
+             ["/usr/share/fonts/opentype/noto/NotoSansCJK-Light.ttc"], "Microsoft YaHei Light"),
+    "等线": (["Dengb.ttf", "Deng.ttf", "msyh.ttc"], ["/System/Library/Fonts/PingFang.ttc"],
+             ["/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc"], "DengXian"),
+    "楷体": (["simkai.ttf"], ["/System/Library/Fonts/Supplemental/Kaiti.ttc", "/Library/Fonts/Kaiti.ttc",
+                               "/System/Library/Fonts/STKaiti.ttc"], ["/usr/share/fonts/truetype/arphic/ukai.ttc"], "KaiTi"),
+    "宋体": (["simsun.ttc"], ["/System/Library/Fonts/Supplemental/Songti.ttc", "/System/Library/Fonts/Songti.ttc"],
+             ["/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc"], "SimSun"),
+    "仿宋": (["simfang.ttf", "simsun.ttc"], ["/System/Library/Fonts/Supplemental/Songti.ttc"],
+             ["/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc"], "FangSong"),
+}
+FONT_ALIASES = {"sans": "黑体", "bold": "黑体", "heiti": "黑体", "simhei": "黑体", "yahei": "雅黑", "微软雅黑": "雅黑",
+                "light": "细体", "thin": "细体", "dengxian": "等线", "kaiti": "楷体", "kai": "楷体", "手写": "楷体",
+                "serif": "宋体", "songti": "宋体", "simsun": "宋体", "fangsong": "仿宋"}
+
+
+def _family(name: str | None) -> str | None:
+    n = (name or "").strip()
+    return n if n in FONT_FAMILIES else FONT_ALIASES.get(n.lower())
+
+
+def font_file(name: str | None, bold: bool = True) -> str | None:
+    """Font file for a family name (黑体/楷体/宋体/仿宋/等线/雅黑/细体 or an alias); falls back to the default."""
+    fam = _family(name)
+    if fam:
+        win, mac, linux, _ = FONT_FAMILIES[fam]
+        if IS_WIN:
+            d = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+            found = _first_existing([os.path.join(d, n) for n in win])
+        else:
+            found = _first_existing(mac if IS_MAC else linux)
+        if found:
+            return found
+    elif name:
+        from .fonts import FONT_DIR, lookup
+
+        got = lookup(name)
+        if got:
+            return str(got[0])
+        dirs = [FONT_DIR, Path(fonts_dir() or "."), Path(os.environ.get("LOCALAPPDATA", ".")) / "Microsoft/Windows/Fonts"]
+        for d in dirs:
+            for cand in (name, f"{name}.ttf", f"{name}.ttc", f"{name}.otf"):
+                if (d / cand).is_file():
+                    return str(d / cand)
+        if Path(name).is_file():
+            return name
+    return default_font_file(bold)
+
+
+def font_name(name: str | None) -> str:
+    """Family name for ASS subtitles (libass looks fonts up by name)."""
+    fam = _family(name)
+    if fam and font_file(fam) != default_font_file(True):
+        return FONT_FAMILIES[fam][3]
+    if name and not fam:
+        from .fonts import lookup
+
+        got = lookup(name)
+        return got[1] if got else name
+    return default_font_name()
+
+
+def fonts_dir_for(name: str | None) -> str | None:
+    """libass looks fonts up by name: point it at our download folder when the subtitle font lives there."""
+    from .fonts import FONT_DIR, lookup
+
+    return str(FONT_DIR) if name and lookup(name) else fonts_dir()
+
+
 def default_font_name() -> str:
     if IS_WIN:
         return "Microsoft YaHei"

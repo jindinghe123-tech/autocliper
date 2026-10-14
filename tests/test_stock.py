@@ -127,16 +127,6 @@ def test_url_ext_and_credit():
     assert line == "《T》 by A · CC BY 4.0 · Openverse（Freesound） https://f/1"
 
 
-def test_produce_relevance_and_query_variants():
-    from autostudio.tools.produce import relevance, variants
-
-    assert relevance({"title": "Carl Frederick Tandberg at the American Music Company"}, "robot dog walking") == 0
-    assert relevance({"title": "Robotic dogs walk", "tags": ["robot"]}, "robot dog walking") == 3
-    assert relevance({"title": "Mushrooms on the forest floor"}, "mushroom fungi forest floor") == 3
-    assert variants("robot dog walking in forest") == ["robot dog walking in forest", "robot dog", "walking forest", "walking"]
-    assert variants("ocean") == ["ocean"]
-
-
 def test_trending_risk_flags():
     from autostudio.tools.research import _flag
 

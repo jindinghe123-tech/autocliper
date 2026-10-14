@@ -18,6 +18,10 @@ function publishSummary(a) {
 
 export const TOOL_META = {
   asset_search: ["搜索素材", "search"], asset_download: ["下载素材", "download"],
+  plan_update: ["工作清单", "check"], project_open: ["剪辑项目", "film"], project_brief: ["创意方案", "sparkles"],
+  timeline_edit: ["编辑时间线", "edit"], timeline_view: ["查看时间线", "layers"], voice_lines: ["录口播", "mic"],
+  timeline_render: ["渲染", "film"], deliver: ["交付检查", "check"], font_list: ["字体", "type"], font_get: ["下载字体", "type"],
+  trending_topics: ["热榜", "globe"], web_search: ["搜索网页", "search"],
   social_accounts: ["查看社交账号", "globe"], social_publish: ["发布到社交平台", "upload"], social_posts: ["发布记录", "upload"],
   media_info: ["媒体信息", "info"], video_analyze: ["看懂视频", "film"], video_watch: ["观看片段", "play"],
   video_ask: ["Gemini 看视频", "sparkles"], video_trim: ["截取片段", "scissors"], video_cut: ["剪辑片段", "scissors"],
@@ -179,6 +183,7 @@ class Thread {
       h("span", { class: "tool-sum" }, summarize(name, args)),
       state);
     const el = h("div", { class: "tool" }, head, bar, ptext, detail, files);
+    if (name === "plan_update" && Array.isArray(args?.items)) files.append(planList(args));
     g.body.append(el);
     const card = { el, state, bar, ptext, detail, files, done: false };
     this.cards.set(id, card);
@@ -284,8 +289,23 @@ class Thread {
   }
 }
 
+function planList(args) {
+  const mark = { done: "✓", doing: "▶", skipped: "–" };
+  return h("div", { class: "plan-list" },
+    args.items.map((it) => h("div", { class: `plan-item ${it.status || "todo"}` },
+      h("span", { class: "plan-mark" }, mark[it.status] || "○"), h("span", {}, it.text || ""))),
+    args.note ? h("div", { class: "plan-note" }, args.note) : null);
+}
+
 function summarize(name, args) {
   if (!args || typeof args !== "object") return "";
+  if (name === "plan_update") {
+    const items = args.items || [];
+    return `${items.filter((i) => i.status === "done").length}/${items.length} 完成${args.note ? " · " + args.note : ""}`;
+  }
+  if (name === "timeline_edit") return `${args.project || ""} · ${(args.ops || []).map((o) => o.op).join(" ")}`.slice(0, 90);
+  if (name === "voice_lines") return `${(args.lines || []).length} 句`;
+  if (name === "timeline_render") return `${args.project || ""} · ${args.quality === "final" ? "最终版" : "预览"}`;
   const pick = args.input ?? args.path ?? args.video ?? args.source ?? args.url ?? args.command ?? args.name;
   if (Array.isArray(args.inputs)) return args.inputs.map(basename).join(" + ");
   if (name === "video_compose") return `${(args.clips || []).length} 个片段${args.music ? " · 配乐" : ""}${args.size ? " · " + args.size : ""}`;
