@@ -7,7 +7,7 @@ A project is a JSON document (workspace/projects/<name>/timeline.json) holding:
   overlays  pictures/videos on top (picture-in-picture, stickers, logos) with position, size, opacity
   audio     any number of clips — voice, music, sound effects — each with its own time, trim, volume and fades;
             music ducks under voice; voice clips with a sidecar .srt become the subtitles
-plus the creative brief, render history and which renders were actually watched.
+plus the author's free-form statement of intent and the render history.
 The agent edits it with small operations, inspects it, renders previews, watches them and revises; delivery is
 gated by the brief and automatic quality checks (see tools/editing.py).
 """
@@ -19,21 +19,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .media import ffmpeg as ff
 from .media import subs as sublib
 
-BRIEF_FIELDS: dict[str, tuple[str, int]] = {
-    "audience": ("给谁看、他们为什么会停下来", 6),
-    "message": ("看完要记住的一句话", 6),
-    "format": ("形式：口播解说 / 卡点混剪 / 情景短剧 / 对比测评 / 清单盘点 / 教程 / 文字动效 / vlog / 其它", 4),
-    "duration": ("目标时长（秒）", 1),
-    "structure": ("结构和节奏：分几段、每段讲什么多长、哪里加速、哪里停顿留白", 25),
-    "visual": ("视觉语言：版式、色调、字体（为什么选它）、文字怎么出现、镜头运动、转场", 25),
-    "sound": ("声音设计：配音的语气、音乐风格和进出点、音效放在哪里、哪里安静", 15),
-    "hook": ("前 3 秒具体怎么抓人（画面 + 声音 + 文字）", 10),
-    "ending": ("结尾怎么收：总结 / 反转 / 提问 / 悬念", 6),
-    "not_generic": ("这条视频和套路化模板视频的区别在哪里，为什么只适合这个题材", 25),
-}
 FORBIDDEN_ON_SCREEN = re.compile(r"https?://|www\.|\.(com|cn|net|org)\b|来源[:：]|据.{0,10}报道|参考资料|免责声明|"
                                  r"本视频(由|为)|AI ?生成|以上(信息|内容)")
 KINDS = {"video": "v", "texts": "t", "overlays": "o", "audio": "a"}
@@ -161,32 +148,20 @@ def check(p: dict[str, Any]) -> list[str]:
         s0, s1 = audio_span(a)
         if s0 >= pic + 0.05 and pic:
             warn.append(f"{a['id']} 在画面结束之后才开始")
-    if p["video"] and not any(a.get("role") == "music" for a in p["audio"]):
-        warn.append("没有背景音乐（如果是有意为之可以忽略）")
     for x in p["texts"]:
         s0, s1 = text_span(x)
         n = len(re.sub(r"\s", "", x.get("text") or ""))
         if s1 - s0 < 0.4 + n / 8:
-            warn.append(f"文字 {x['id']}「{x['text'][:10]}」{n} 个字只显示 {s1 - s0:.1f}s，读不完")
-        if max(len(ln) for ln in (x.get("text") or " ").replace("\\n", "\n").split("\n")) > 14:
-            warn.append(f"文字 {x['id']} 一行超过 14 个字，竖屏放不下或太挤，考虑换行")
+            warn.append(f"文字 {x['id']}「{x['text'][:10]}」{n} 个字显示 {s1 - s0:.1f}s，按正常阅读速度约需 {0.4 + n / 8:.1f}s")
         if s0 >= pic and pic:
             warn.append(f"文字 {x['id']} 在画面结束之后")
         if FORBIDDEN_ON_SCREEN.search(x.get("text") or ""):
             warn.append(f"文字 {x['id']} 含网址 / 来源 / 声明之类的内容，不应出现在画面里")
         if p["height"] > p["width"] and (x.get("position") or "").startswith("bottom"):
-            warn.append(f"文字 {x['id']} 放在底部，会被平台的标题和按钮挡住（竖屏底部约 15%）")
+            warn.append(f"文字 {x['id']} 在画面底部：抖音 / 小红书会在竖屏底部约 15% 盖上标题和按钮")
     for o in p["overlays"]:
         if o.get("src") and not Path(o["src"]).exists():
             warn.append(f"{o['id']} 的文件不存在")
-    brief = p.get("brief") or {}
-    try:
-        target = float(re.findall(r"\d+(?:\.\d+)?", str(brief.get("duration") or ""))[0])
-        total = total_length(p)
-        if total and abs(total - target) / target > 0.35:
-            warn.append(f"总长 {total:.1f}s，和创意方案里的目标 {target:.0f}s 差得比较多")
-    except (IndexError, ValueError, ZeroDivisionError):
-        pass
     return warn
 
 
@@ -194,7 +169,7 @@ def view(p: dict[str, Any]) -> str:
     times, pic = main_track_times(p)
     total = total_length(p)
     lines = [f"项目「{p['name']}」 {p['width']}x{p['height']} {p['fps']}fps · 第 {p['rev']} 版 · 总长 {total:.1f}s · "
-             f"创意方案：{'已写' if p.get('brief') else '未写（渲染前必须先写 project_brief）'}"]
+             f"创作意图：{'已写' if p.get('brief') else '未写（渲染前先用 project_brief 写）'}"]
     lines.append("\n画面轨（按顺序播放）")
     if not p["video"]:
         lines.append("  （空）")
@@ -203,11 +178,13 @@ def view(p: dict[str, Any]) -> str:
             src = f"{_name(c['src'])} {float(c.get('in') or 0):.2f}→{float(c['out']) if c.get('out') is not None else float(c.get('src_duration') or 0):.2f}"
         elif c.get("src"):
             src = f"图 {_name(c['src'])}" + (f" 运镜 {c['kenburns']}" if c.get("kenburns") else "")
+        elif c.get("lavfi"):
+            src = f"生成 {c['lavfi'][:40]}"
         else:
             src = f"色卡 {c.get('color')}"
         extra = [f"×{c['speed']}" if c.get("speed") not in (None, 1, 1.0) else "", c.get("fit") or "",
                  "+".join(e if isinstance(e, str) else e.get("name", "") for e in c.get("effects") or []),
-                 f"原声{c['volume']}" if c.get("volume") else ""]
+                 f"原声{c['volume']}" if c.get("volume") else "", f"vf={c['vf'][:40]}" if c.get("vf") else ""]
         tn, td = trans_of(c)
         lines.append(f"  {c['id']:>4} {_fmt(s0)}–{_fmt(s1)}  {src}  {' '.join(x for x in extra if x)}"
                      f"  → {'硬切' if tn == 'none' else f'{tn} {td}s'}" + (f"  # {c['note']}" if c.get("note") else ""))
@@ -285,7 +262,7 @@ def note_watch(path: Path, start: float, end: float) -> None:
 
 def to_clip(c: dict[str, Any]) -> dict[str, Any]:
     """Main-track item → video_compose clip dict."""
-    out: dict[str, Any] = {k: c[k] for k in ("fit", "bg", "effects") if c.get(k) is not None}
+    out: dict[str, Any] = {k: c[k] for k in ("fit", "bg", "effects", "vf") if c.get(k) is not None}
     if c.get("kind") == "video":
         out.update(src=c["src"], start=float(c.get("in") or 0), speed=float(c.get("speed") or 1),
                    volume=float(c.get("volume") or 0))

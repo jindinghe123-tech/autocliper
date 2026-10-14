@@ -33,11 +33,11 @@ def test_checks_catch_editing_problems():
            texts=[{"id": "t1", "text": "这是一句非常非常非常长而且只闪一下的文字", "at": 1, "duration": 0.8, "position": "bottom"},
                   {"id": "t2", "text": "来源：www.example.com", "at": 2, "duration": 2}],
            audio=[{"id": "a1", "role": "voice", "at": 0, "duration": 2},
-                  {"id": "a2", "role": "voice", "at": 1.5, "duration": 4}],
-           brief={"duration": "30"})
+                  {"id": "a2", "role": "voice", "at": 1.5, "duration": 4}])
     warn = "\n".join(tl.check(p))
-    for expected in ("重叠", "读不完", "超过 14 个字", "平台的标题和按钮挡住", "网址", "画面只有", "目标 30s", "没有背景音乐"):
+    for expected in ("重叠", "阅读速度", "标题和按钮", "网址", "画面只有"):
         assert expected in warn, expected
+    assert "背景音乐" not in warn   # facts only: having no music is a choice, not a problem
 
 
 def test_subtitles_follow_voice_clips(tmp_path):
@@ -62,10 +62,11 @@ def test_brief_is_required_and_must_be_specific(tmp_path):
 
     ctx = ToolContext(session_id="s", workspace=tmp_path, emit=emit)
     asyncio.run(ed.project_open(ctx, "demo"))
-    with pytest.raises(ToolError, match="创意方案"):
+    with pytest.raises(ToolError, match="创作意图"):
         asyncio.run(ed.timeline_render(ctx, "demo"))
-    with pytest.raises(ToolError, match="太笼统|缺少"):
-        asyncio.run(ed.project_brief(ctx, "demo", {k: "好" for k in tl.BRIEF_FIELDS}))
+    with pytest.raises(ToolError, match="太少"):
+        asyncio.run(ed.project_brief(ctx, "demo", "做一个好看的视频"))
+    assert asyncio.run(ed.project_brief(ctx, "demo", "给宿舍党看的悬念科普。" * 12))["ok"]
     with pytest.raises(ToolError, match="没有「sparkle」这个特效"):
         asyncio.run(ed.timeline_edit(ctx, "demo", [{"op": "add_clip", "color": "#000", "duration": 2, "effects": ["sparkle"]}]))
     r = asyncio.run(ed.timeline_edit(ctx, "demo", [
@@ -73,8 +74,60 @@ def test_brief_is_required_and_must_be_specific(tmp_path):
         {"op": "add_clip", "color": "#fff", "duration": 3},
         {"op": "split", "id": "v2", "at": 1},
         {"op": "move", "id": "v1", "index": 3},
-        {"op": "add_text", "text": "钩子", "at": 0, "duration": 1.5, "font": "楷体"},
+        {"op": "add_text", "text": "钩子", "at": 0, "duration": 1.5, "font": "楷体", "x": "(w-text_w)/2+100*sin(t*4)", "y": 300},
+        {"op": "add_clip", "lavfi": "gradients=s=320x240:speed=0.02", "duration": 2, "vf": "hue=s=0"},
     ]))
     _d, p = tl.load(Path(tmp_path), "demo")
-    assert [c["id"] for c in p["video"]] == ["v2", "v3", "v1"] and [c["duration"] for c in p["video"]] == [1.0, 2.0, 2]
+    assert [c["id"] for c in p["video"]] == ["v2", "v3", "v1", "v4"] and [c["duration"] for c in p["video"]] == [1.0, 2.0, 2, 2]
+    assert p["video"][3]["kind"] == "gen" and p["texts"][0]["x"].startswith("(w-text_w)")
     assert r["rev"] == p["rev"] and "钩子" in r["timeline"]
+
+
+def test_studio_run_executes_code_and_reports_files(tmp_path):
+    from autostudio.tools.workbench import studio_run
+
+    async def emit(_ev):
+        return None
+
+    ctx = ToolContext(session_id="s", workspace=tmp_path, emit=emit)
+    code = (
+        "from autostudio.studio import *\n"
+        "img = canvas(64, 64, (255, 0, 0, 255))\n"
+        "img.save('red.png')\n"
+        "print('size', probe('red.png')['width'] or 64, ease(1, 'out_back'))\n"
+    )
+    r = asyncio.run(studio_run(ctx, code))
+    assert r["ok"] and "size 64 1" in r["output"] and r["files"][0].endswith("red.png")
+    assert (tmp_path / r["script"]).exists()                      # kept for reuse
+    bad = asyncio.run(studio_run(ctx, "raise ValueError('boom')"))
+    assert not bad["ok"] and "boom" in bad["output"]
+
+
+def test_delivery_gate_needs_watching_and_review(tmp_path, monkeypatch):
+    import subprocess
+
+    from autostudio.media.ffmpeg import ffmpeg_bin
+    from autostudio.tools import workbench
+
+    monkeypatch.setattr(workbench, "LOG", tmp_path / "log.json")
+    vid = tmp_path / "cut.mp4"
+    subprocess.run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x240:d=4", "-f", "lavfi", "-i",
+                    "sine=f=440:d=4", "-shortest", "-pix_fmt", "yuv420p", str(vid)], check=True)
+
+    async def emit(_ev):
+        return None
+
+    ctx = ToolContext(session_id="s", workspace=tmp_path, emit=emit)
+    pub, cover = {"title": "t", "description": "d"}, {"title": "封面"}
+    r = asyncio.run(ed.deliver(ctx, "cut.mp4", pub, cover))
+    assert not r["ok"] and any("开头" in f for f in r["fix_these"]) and any("review_cut" in f for f in r["fix_these"])
+    for a, b in ((0, 2), (1.5, 2.5), (3, 4)):
+        workbench.note_watch(vid, a, b)
+    workbench._update(vid, lambda rec: rec["reviews"].append({"verdict": "revise", "must_fix": [{"issue": "x"}]}))
+    r = asyncio.run(ed.deliver(ctx, "cut.mp4", pub, cover))
+    assert not r["ok"] and any("必须修改" in f for f in r["fix_these"])
+    r = asyncio.run(ed.deliver(ctx, "cut.mp4", pub, cover, responses=["这是测试图，不需要改"]))
+    assert r["ok"] and r["delivered"], r
+    workbench.note_watch(vid, 0, 1)
+    vid.write_bytes(vid.read_bytes() + b"\0")                    # a new version resets what was watched and reviewed
+    assert workbench.cut_record(vid) == {"watched": [], "reviews": []}

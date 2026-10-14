@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .anthropic import AnthropicProvider
-from .base import Provider, ProviderError
+from .base import Provider, ProviderError, stream_retrying
 from .openai_chat import OpenAIChatProvider
 from .responses import ResponsesProvider
 
@@ -42,4 +42,4 @@ def make_provider(settings: dict[str, Any], provider_id: str | None = None, mode
     raise ProviderError(f"未知的提供方类型：{ptype}")
 
 
-__all__ = ["make_provider", "Provider", "ProviderError"]
+__all__ = ["make_provider", "Provider", "ProviderError", "stream_retrying"]

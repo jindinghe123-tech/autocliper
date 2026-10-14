@@ -338,7 +338,8 @@ async def stop_session(sid: str) -> dict[str, Any]:
 
 @app.post("/api/sessions/{sid}/approve")
 async def approve(sid: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
-    ok = bool(state.runs and state.runs.resolve_approval(sid, str(body.get("id")), bool(body.get("approved"))))
+    ok = bool(state.runs and state.runs.resolve_approval(sid, str(body.get("id")), bool(body.get("approved")),
+                                                         bool(body.get("remember"))))
     return {"ok": ok}
 
 

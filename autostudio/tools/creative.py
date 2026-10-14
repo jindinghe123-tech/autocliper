@@ -35,7 +35,10 @@ EFFECT_NAMES = [
 
 def _pos_xy(position: str | None, w: int, h: int, x: Any = None, y: Any = None) -> tuple[str, str]:
     def val(v: Any, total: int, axis: str) -> str:
-        f = float(v)
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return str(v)   # an ffmpeg expression, e.g. "w*0.1+200*t" or "if(lt(t,1),-text_w,80)"
         return str(int(f * total)) if 0 <= f <= 1 else str(int(f))
 
     if x is not None and y is not None:
@@ -75,6 +78,8 @@ def text_filters(ctx: ToolContext, tmp: Path, items: list[dict[str, Any]], w: in
         alpha = None
         if anim in ("fade", "slide_up", "slide_down", "slide_left", "pop"):
             alpha = f"if(lt(t,{a + fd:.3f}),(t-{a:.3f})/{fd:.3f},if(gt(t,{b - fd:.3f}),({b:.3f}-t)/{fd:.3f},1))"
+        if it.get("alpha") is not None:   # the author's own opacity expression replaces the preset animation
+            alpha = str(it["alpha"])
         if anim == "slide_up":
             y = f"({y})+{int(h * 0.04)}*max(0,1-(t-{a:.3f})/{fd * 1.4:.3f})"
         elif anim == "slide_down":
@@ -329,6 +334,8 @@ async def _render_clip(ctx: ToolContext, clip: dict[str, Any], i: int, w: int, h
     fx = effects_chain(clip.get("effects"), w, h, fps, dur, f"c{i}", ctx)
     if fx:
         post.append(fx)
+    if clip.get("vf"):   # raw ffmpeg filter chain written by the author
+        post.append(str(clip["vf"]))
     texts = clip.get("text") or clip.get("texts")
     if texts:
         items = texts if isinstance(texts, list) else [texts]

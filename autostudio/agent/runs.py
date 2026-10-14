@@ -26,10 +26,13 @@ class Run:
         for q in list(self.subscribers):
             q.put_nowait(ev)
 
-    async def request_approval(self, approval_id: str, name: str, args: dict[str, Any], timeout: float = 900) -> bool:
-        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    async def request_approval(self, approval_id: str, name: str, args: dict[str, Any], timeout: float = 900,
+                               can_remember: bool = False) -> bool | str:
+        """True / False, or "session" when the user allowed this kind of action for the rest of the conversation."""
+        fut: asyncio.Future[bool | str] = asyncio.get_running_loop().create_future()
         self.approvals[approval_id] = fut
-        await self.emit({"type": "approval_request", "id": approval_id, "name": name, "arguments": args})
+        await self.emit({"type": "approval_request", "id": approval_id, "name": name, "arguments": args,
+                         "can_remember": can_remember})
         try:
             return await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
@@ -42,6 +45,7 @@ class Run:
 class RunManager:
     def __init__(self) -> None:
         self.runs: dict[str, Run] = {}
+        self.session_allow: dict[str, set[str]] = {}   # session id -> permission kinds allowed for the conversation
 
     def get(self, sid: str) -> Run | None:
         return self.runs.get(sid)
@@ -93,12 +97,12 @@ class RunManager:
         r.task.cancel()
         return True
 
-    def resolve_approval(self, sid: str, approval_id: str, approved: bool) -> bool:
+    def resolve_approval(self, sid: str, approval_id: str, approved: bool, remember: bool = False) -> bool:
         r = self.runs.get(sid)
         fut = r.approvals.get(approval_id) if r else None
         if not fut or fut.done():
             return False
-        fut.set_result(approved)
+        fut.set_result("session" if approved and remember else approved)
         return True
 
     async def subscribe(self, sid: str, after: int = -1) -> AsyncIterator[dict[str, Any]]:

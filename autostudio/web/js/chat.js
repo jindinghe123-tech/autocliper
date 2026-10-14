@@ -18,7 +18,7 @@ function publishSummary(a) {
 
 export const TOOL_META = {
   asset_search: ["搜索素材", "search"], asset_download: ["下载素材", "download"],
-  plan_update: ["工作清单", "check"], project_open: ["剪辑项目", "film"], project_brief: ["创意方案", "sparkles"],
+  plan_update: ["工作清单", "check"], studio_run: ["写代码处理", "terminal"], review_cut: ["总编审片", "eye"], project_open: ["剪辑项目", "film"], project_brief: ["创作意图", "sparkles"],
   timeline_edit: ["编辑时间线", "edit"], timeline_view: ["查看时间线", "layers"], voice_lines: ["录口播", "mic"],
   timeline_render: ["渲染", "film"], deliver: ["交付检查", "check"], font_list: ["字体", "type"], font_get: ["下载字体", "type"],
   trending_topics: ["热榜", "globe"], web_search: ["搜索网页", "search"],
@@ -225,17 +225,19 @@ class Thread {
   approval(ev, sid) {
     const g = this.ensureGroup();
     const args = ev.arguments || {};
-    const body = args.command ? args.command : ev.name === "social_publish" ? publishSummary(args) : JSON.stringify(args, null, 2);
+    const body = args.command ? args.command : args.code ? args.code
+      : ev.name === "social_publish" ? publishSummary(args) : JSON.stringify(args, null, 2);
     const btns = h("div", { class: "row" });
     const el = h("div", { class: "approval" },
       h("div", { class: "row", html: icon("alert") + "<b>需要你的批准</b>" }),
       h("div", { class: "small muted", style: { marginTop: "4px" } }, `Agent 想要执行「${(TOOL_META[ev.name] || [ev.name])[0]}」：`),
       h("pre", {}, body), btns);
-    const decide = async (approved) => {
+    const decide = async (approved, remember = false) => {
       btns.innerHTML = '<span class="muted small">已提交…</span>';
-      try { await post(`/api/sessions/${sid}/approve`, { id: ev.id, approved }); } catch (e) { toast(e.message, "err"); }
+      try { await post(`/api/sessions/${sid}/approve`, { id: ev.id, approved, remember }); } catch (e) { toast(e.message, "err"); }
     };
     btns.append(h("button", { class: "btn primary sm", onclick: () => decide(true) }, "允许执行"),
+      ev.can_remember ? h("button", { class: "btn sm", onclick: () => decide(true, true) }, "本对话都允许") : null,
       h("button", { class: "btn sm", onclick: () => decide(false) }, "拒绝"),
       h("a", { class: "small muted", href: "#/settings/general", style: { marginLeft: "8px" } }, "权限设置"));
     g.body.append(el);
@@ -269,6 +271,9 @@ class Thread {
       case "text_delta": this.delta(ev.delta); break;
       case "reasoning_delta": this.reasoningDelta(ev.delta); break;
       case "assistant_done": this.finishAssistant(ev.message); break;
+      case "assistant_retry":
+        if (this.seg) { this.seg.box.remove(); this.seg = null; }
+        this.notice(ev.text); this.startAssistant(); break;
       case "tool_start": this.mark(); this.toolCard(ev.id, ev.name, ev.arguments); break;
       case "tool_progress": this.toolProgress(ev.id, ev.progress, ev.text); break;
       case "tool_result": this.toolResult(ev.message); break;
@@ -305,6 +310,7 @@ function summarize(name, args) {
   }
   if (name === "timeline_edit") return `${args.project || ""} · ${(args.ops || []).map((o) => o.op).join(" ")}`.slice(0, 90);
   if (name === "voice_lines") return `${(args.lines || []).length} 句`;
+  if (name === "studio_run") return String(args.code || "").split("\n").find((l) => l.trim() && !l.startsWith("from ") && !l.startsWith("import ")) || "";
   if (name === "timeline_render") return `${args.project || ""} · ${args.quality === "final" ? "最终版" : "预览"}`;
   const pick = args.input ?? args.path ?? args.video ?? args.source ?? args.url ?? args.command ?? args.name;
   if (Array.isArray(args.inputs)) return args.inputs.map(basename).join(" + ");

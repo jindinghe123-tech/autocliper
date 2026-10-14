@@ -10,10 +10,12 @@ Each provider converts this into its own wire format.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import mimetypes
+import ssl
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +61,27 @@ class Provider:
 
     async def list_models(self) -> list[str]:
         return []
+
+
+async def stream_retrying(provider: Provider, system: str, messages: list[dict[str, Any]],
+                          tools: list[dict[str, Any]], emit: Emit,
+                          on_retry: Callable[[int, Exception], Awaitable[None]] | None = None,
+                          attempts: int = 4) -> TurnResult:
+    """provider.stream, generated again when the connection drops mid-answer.
+
+    Nothing an answer asks for has run yet when its stream breaks, so a fresh attempt is safe;
+    `on_retry` lets the caller throw away whatever half answer it already showed.
+    """
+    for n in range(1, attempts + 1):
+        try:
+            return await provider.stream(system, messages, tools, emit)
+        except (httpx.TransportError, ssl.SSLError, ConnectionError) as e:
+            if n == attempts:
+                raise ProviderError(f"与模型的连接反复中断（{e}），请稍后发送「继续」") from e
+            if on_retry:
+                await on_retry(n, e)
+            await asyncio.sleep(2 * n)
+    raise AssertionError("unreachable")
 
 
 async def iter_sse(resp: httpx.Response) -> AsyncIterator[tuple[str, str]]:

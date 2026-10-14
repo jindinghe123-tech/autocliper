@@ -14,6 +14,7 @@ CORE = [
     ("multipart", "文件上传"),
     ("apscheduler", "定时任务"),
     ("numpy", "音频分析"),
+    ("PIL", "逐帧画面处理"),
 ]
 OPTIONAL = [
     ("faster_whisper", "语音识别字幕"),

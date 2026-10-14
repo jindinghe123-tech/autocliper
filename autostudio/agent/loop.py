@@ -11,7 +11,7 @@ from typing import Any
 
 from .. import state
 from ..media.ffmpeg import IMAGE_EXTS, FFmpegError
-from ..providers import ProviderError, make_provider
+from ..providers import ProviderError, make_provider, stream_retrying
 from ..tools import REGISTRY, ToolContext, ToolError, call_tool, to_text
 from .prompts import build_system_prompt
 from .runs import Run
@@ -21,7 +21,7 @@ log = logging.getLogger("autostudio.agent")
 MAX_CONTEXT_CHARS = 350_000
 KEEP_IMAGES = 4      # messages whose images are still sent
 MAX_IMAGES = 8       # and no more than this many images in one request
-DANGEROUS_PERMISSION = {"run_command": "shell", "social_publish": "publish"}
+DANGEROUS_PERMISSION = {"run_command": "shell", "social_publish": "publish", "studio_run": "code"}
 
 
 def prepare_history(history: list[dict[str, Any]], vision: bool) -> list[dict[str, Any]]:
@@ -116,7 +116,14 @@ async def execute_tool(run: Run, tc: Any, settings: dict[str, Any], workspace: P
         elif perm == "deny":
             allowed = False
         else:
-            allowed = await run.request_approval(tc.id, t.name, args)
+            remembered = perm_key in (state.runs.session_allow.get(run.session_id) or set()) if state.runs else False
+            if remembered:
+                allowed = True
+            else:
+                answer = await run.request_approval(tc.id, t.name, args, can_remember=perm_key in ("code", "shell"))
+                if answer == "session" and state.runs:
+                    state.runs.session_allow.setdefault(run.session_id, set()).add(perm_key)
+                allowed = bool(answer)
         if not allowed:
             msg["content"] = "用户未批准执行此操作（或设置中禁用了该类操作）。请换一种方式，或向用户说明需要什么权限。"
             msg["denied"] = True
@@ -199,10 +206,16 @@ async def run_agent(run: Run, session_id: str, text: str, attachments: list[str]
                 partial["reasoning"] += ev["delta"]
             await run.emit(ev)
 
+        async def on_retry(n: int, _e: Exception) -> None:
+            # a dropped connection only loses this one step, so the half answer on screen is replaced
+            partial["text"] = partial["reasoning"] = ""
+            await run.emit({"type": "assistant_retry", "text": f"与模型的连接中断，正在重新生成这一步（第 {n} 次重试）"})
+
         await run.emit({"type": "assistant_start", "model": model_name})
         try:
-            result = await provider.stream(system, prepare_history(_contiguous_tools(history), provider.vision),
-                                           tools, emit)
+            result = await stream_retrying(provider, system,
+                                           prepare_history(_contiguous_tools(history), provider.vision),
+                                           tools, emit, on_retry)
         except asyncio.CancelledError:
             if partial["text"].strip():
                 state.db.add_message(session_id, {"role": "assistant", "content": partial["text"] + "\n\n（已停止）",

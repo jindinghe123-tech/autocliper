@@ -333,8 +333,8 @@ async def video_watch(ctx: ToolContext, input: str, start: Any = 0, end: Any = N
     items = [(t, ("● " if focus is not None and abs(t - focus) <= window / n / 2 + 1e-6 else "") + label(t)) for t in times]
     sheets = await contact_sheets(ctx, src, items, portrait,
                                   cols=6 if portrait else 4, per_sheet=18 if portrait else 12, name=f"{src.stem}_watch")
-    from .. import timeline   # a project render that has been looked at counts toward delivery
-    timeline.note_watch(src, a, b)
+    from .workbench import note_watch   # the delivery gate checks that the author actually looked
+    note_watch(src, a, b)
     res: dict[str, Any] = {"window": f"{label(a)}–{label(b)}", "frames": n, "fps": round(n / window, 2),
                            "images": [str(p) for p in sheets], "files": [str(p) for p in sheets],
                            "how_to_read": "图片按时间从左到右、从上到下排列，每格左上角是该帧时间"

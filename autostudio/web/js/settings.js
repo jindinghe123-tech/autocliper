@@ -579,6 +579,8 @@ async function renderGeneral(body) {
   const s = store.settings;
   const ff = store.meta?.ffmpeg || {};
   const ws = h("input", { class: "input mono", value: s.workspace });
+  const code = h("select", { class: "select" }, [["ask", "每个对话第一次询问（推荐）"], ["allow", "总是允许"], ["deny", "禁止"]]
+    .map(([v, l]) => h("option", { value: v, selected: (s.permissions?.code || "ask") === v }, l)));
   const shell = h("select", { class: "select" }, [["ask", "每次询问（推荐）"], ["allow", "总是允许"], ["deny", "禁止"]]
     .map(([v, l]) => h("option", { value: v, selected: (s.permissions?.shell || "ask") === v }, l)));
   const steps = h("input", { class: "input", type: "number", min: 5, max: 300, value: s.agent?.max_steps || 60, style: { width: "120px" } });
@@ -595,6 +597,7 @@ async function renderGeneral(body) {
     h("div", { class: "card" },
       h("div", { class: "field" }, h("label", {}, "工作区文件夹"), ws, h("div", { class: "hint" }, "上传的素材和生成的文件都保存在这里。Agent 的相对路径以此为根目录。")),
       h("div", { class: "row" }, h("div", { class: "field grow" }, h("label", {}, "执行命令行的权限"), shell),
+        h("div", { class: "field grow" }, h("label", {}, "Agent 写代码处理画面 / 声音"), code),
         h("div", { class: "field" }, h("label", {}, "单次最多步数"), steps)),
       h("div", { class: "field" }, h("label", {}, "自定义指令（附加到系统提示词）"), extra),
       h("div", { class: "field" }, h("label", {}, "FFmpeg 路径"), ffpath,
@@ -603,7 +606,7 @@ async function renderGeneral(body) {
       h("div", { class: "row" }, h("span", { class: "small muted" }, "界面主题"), theme, h("div", { class: "grow" }),
         h("button", { class: "btn primary", onclick: async () => {
           try {
-            await put("/api/settings", { workspace: ws.value.trim(), permissions: { shell: shell.value }, ffmpeg_path: ffpath.value.trim(),
+            await put("/api/settings", { workspace: ws.value.trim(), permissions: { shell: shell.value, code: code.value }, ffmpeg_path: ffpath.value.trim(),
               agent: { max_steps: parseInt(steps.value, 10) || 60, extra_prompt: extra.value } });
             await refreshSettings();
             store.meta = await get("/api/meta");

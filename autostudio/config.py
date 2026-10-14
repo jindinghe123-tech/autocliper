@@ -85,7 +85,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "api_model": "gpt-4o-mini-tts",
         "api_voice": "alloy",
     },
-    "permissions": {"shell": "ask", "publish": "ask"},   # ask | allow | deny
+    "permissions": {"shell": "ask", "publish": "ask", "code": "ask"},   # ask | allow | deny
     # Royalty-free asset search (media/stock.py). Keys are optional: Openverse + Wikimedia work without any.
     "assets": {"pexels_key": "", "pixabay_key": "", "freesound_key": "", "jamendo_client_id": "",
                "commercial_only": True, "proxy": ""},
