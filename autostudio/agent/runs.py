@@ -10,9 +10,13 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 log = logging.getLogger("autostudio.runs")
 
 
+Notify = Callable[[str, dict[str, Any]], None]
+
+
 class Run:
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, notify: Notify | None = None):
         self.session_id = session_id
+        self.notify = notify        # hears what a phone should be told about (see remote.Notices)
         self.events: list[dict[str, Any]] = []
         self.subscribers: set[asyncio.Queue[dict[str, Any] | None]] = set()
         self.done = False
@@ -26,6 +30,14 @@ class Run:
         for q in list(self.subscribers):
             q.put_nowait(ev)
 
+    def notice(self, ev: dict[str, Any]) -> None:
+        if not self.notify:
+            return
+        try:
+            self.notify(self.session_id, {**ev, "seconds": int(time.time() - self.started)})
+        except Exception:  # noqa: BLE001 — a notification must never break the run
+            log.warning("run notice failed: %s", traceback.format_exc())
+
     async def request_approval(self, approval_id: str, name: str, args: dict[str, Any], timeout: float = 900,
                                can_remember: bool = False) -> bool | str:
         """True / False, or "session" when the user allowed this kind of action for the rest of the conversation."""
@@ -33,6 +45,7 @@ class Run:
         self.approvals[approval_id] = fut
         await self.emit({"type": "approval_request", "id": approval_id, "name": name, "arguments": args,
                          "can_remember": can_remember})
+        self.notice({"type": "approval_needed", "approval_id": approval_id, "name": name})
         try:
             return await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
@@ -40,10 +53,12 @@ class Run:
         finally:
             self.approvals.pop(approval_id, None)
             await self.emit({"type": "approval_resolved", "id": approval_id})
+            self.notice({"type": "approval_resolved", "approval_id": approval_id})
 
 
 class RunManager:
-    def __init__(self) -> None:
+    def __init__(self, notify: Notify | None = None) -> None:
+        self.notify = notify
         self.runs: dict[str, Run] = {}
         self.session_allow: dict[str, set[str]] = {}   # session id -> permission kinds allowed for the conversation
 
@@ -57,22 +72,27 @@ class RunManager:
     def start(self, sid: str, fn: Callable[[Run], Awaitable[Any]]) -> Run:
         if self.is_running(sid):
             raise RuntimeError("该对话正在运行中")
-        run = Run(sid)
+        run = Run(sid, self.notify)
         self.runs[sid] = run
 
         async def wrapper() -> None:
+            notice: dict[str, Any] | None = None     # stopping a run yourself needs no notification
             try:
-                await fn(run)
+                out = await fn(run)
+                notice = {"type": "run_done", "text": out if isinstance(out, str) else ""}
             except asyncio.CancelledError:
                 await run.emit({"type": "cancelled"})
             except Exception as e:  # noqa: BLE001
                 log.error("run failed: %s", traceback.format_exc())
                 await run.emit({"type": "error", "message": str(e) or type(e).__name__})
+                notice = {"type": "run_error", "text": str(e) or type(e).__name__}
             finally:
                 run.done = True
                 await run.emit({"type": "done"})
                 for q in list(run.subscribers):
                     q.put_nowait(None)
+                if notice:
+                    run.notice(notice)
                 asyncio.get_running_loop().call_later(120, self._cleanup, sid, run)
 
         run.task = asyncio.create_task(wrapper())

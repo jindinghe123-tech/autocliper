@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -37,12 +38,14 @@ COOKIE_MAX_AGE = 400 * 86400      # browsers cap cookie lifetime at 400 days
 CODE_TTL = 600                    # a pairing code lives 10 minutes
 CODE_ATTEMPTS = 8                 # wrong guesses before the code is thrown away
 SEEN_SAVE_EVERY = 60
+NOTICE_KEEP = 200                 # notifications kept for phones that were away for a while
+NOTICE_MAX_WAIT = 55              # longest long-poll, under the idle timeout of most routers and proxies
 
 # Reachable from a phone that is not paired yet: the pairing page and what it needs.
 PUBLIC_PATHS = {"/pair", "/api/remote/hello", "/api/remote/pair", "/download/AutoStudio.apk",
                 "/manifest.webmanifest", "/favicon.ico"}
 # Remote-management endpoints a paired phone may use (everything else under /api/remote is PC-only).
-DEVICE_PATHS = {"/api/remote/whoami", "/api/remote/logout"}
+DEVICE_PATHS = {"/api/remote/whoami", "/api/remote/logout", "/api/remote/events"}
 CGNAT = ipaddress.ip_network("100.64.0.0/10")   # Tailscale / ZeroTier style overlay networks
 
 
@@ -139,9 +142,69 @@ def device_label(ua: str) -> str:
     return "浏览器"
 
 
+def _wake(fut: asyncio.Future) -> None:
+    if not fut.done():
+        fut.set_result(None)
+
+
+class Notices:
+    """What paired phones are notified about: runs that finished or failed, and runs waiting for approval.
+
+    Phones long-poll it (GET /api/remote/events). It lives in memory only, and `boot` changes with every
+    start of the PC app, so a phone holding a cursor from before a restart reads this feed from the start
+    instead of waiting for numbers that will never come.
+    """
+
+    def __init__(self) -> None:
+        self.boot = uuid.uuid4().hex[:12]
+        self.items: deque[dict[str, Any]] = deque(maxlen=NOTICE_KEEP)
+        self.cursor = 0
+        self._lock = threading.Lock()
+        self._waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Future]] = set()
+
+    def publish(self, ev: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.cursor += 1
+            ev = {**ev, "id": self.cursor, "ts": time.time()}
+            self.items.append(ev)
+            waiters, self._waiters = self._waiters, set()
+        for loop, fut in waiters:       # waiters may sit in another thread's loop (tests, a second server)
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(_wake, fut)
+        return ev
+
+    def _since(self, after: int | None, boot: str) -> list[dict[str, Any]]:
+        if after is None:           # first contact: the phone only learns where the feed is now
+            return []
+        if boot != self.boot:
+            after = 0
+        return [e for e in self.items if e["id"] > after]
+
+    async def wait(self, after: int | None, boot: str, timeout: float) -> tuple[list[dict[str, Any]], int]:
+        """Notifications after `after` (and the new cursor), waiting up to `timeout` seconds for one."""
+        deadline = time.monotonic() + timeout
+        while True:
+            loop = asyncio.get_running_loop()
+            with self._lock:
+                found, cursor = self._since(after, boot), self.cursor
+                left = deadline - time.monotonic()
+                if found or after is None or left <= 0:
+                    return found, cursor
+                fut = loop.create_future()
+                self._waiters.add((loop, fut))
+            try:
+                await asyncio.wait_for(fut, left)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                with self._lock:
+                    self._waiters.discard((loop, fut))
+
+
 class RemoteAccess:
     def __init__(self, path: Path = REMOTE_FILE):
         self.path = path
+        self.notices = Notices()
         self._lock = threading.Lock()
         self.data = self._load()
         self._code: dict[str, Any] | None = None

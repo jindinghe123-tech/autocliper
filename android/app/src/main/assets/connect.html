@@ -89,6 +89,14 @@
     .code { font-family: var(--mono); font-size: 28px; letter-spacing: .4em; text-align: center; padding-left: 22px; }
     .sheet .err { color: var(--err); font-size: 13px; min-height: 18px; margin-top: 8px; }
     .sheet .btns { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; margin-top: 12px; }
+    .setting { display: flex; align-items: center; gap: 12px; margin-top: 10px; padding: 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--border); cursor: pointer; }
+    .setting .sub { font-size: 12px; color: var(--muted); }
+    .setting .sub.warn { color: var(--warn); }
+    .switch { appearance: none; -webkit-appearance: none; flex: none; width: 44px; height: 26px; border-radius: 999px; margin: 0; background: var(--panel-3);
+      border: 1px solid var(--border-2); position: relative; transition: background .15s; pointer-events: none; }
+    .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: var(--text-2); transition: transform .15s; }
+    .switch:checked { background: var(--accent); border-color: transparent; }
+    .switch:checked::after { transform: translateX(18px); background: #fff; }
     .hidden { display: none !important; }
   </style>
 </head>
@@ -103,6 +111,11 @@
     <div id="mine" class="hidden">
       <div class="section">我的电脑</div>
       <div class="pcs" id="pcs"></div>
+      <div class="setting" id="notify-row">
+        <div class="pc-ico"><svg class="icon" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></div>
+        <div class="pc-main"><div class="pc-name">任务做完时提醒我</div><div class="sub" id="notify-sub"></div></div>
+        <input type="checkbox" class="switch" id="notify" tabindex="-1" aria-label="任务做完时提醒我">
+      </div>
     </div>
 
     <div class="actions">
@@ -409,16 +422,47 @@
       render();
     };
 
+    // ---- "your task is done" notifications (shown by the app even when it is in the background)
+    let notifyState = {};
+    function renderNotify() {
+      try { notifyState = JSON.parse(N.notifyState()); } catch (e) { notifyState = {}; }
+      const { enabled, allowed } = notifyState;
+      $("notify").checked = !!enabled;
+      const sub = $("notify-sub");
+      sub.classList.toggle("warn", !!enabled && !allowed);
+      sub.textContent = !enabled ? "已关闭"
+        : !allowed ? "手机系统还没允许 AutoStudio 发通知，点这里去允许"
+        : "电脑上的任务做完、出错，或者等你批准时，手机会响。锁屏久了可能晚几分钟";
+    }
+    window.onNotifyChanged = renderNotify;
+    $("notify-row").onclick = () => {
+      const { enabled, allowed } = notifyState;
+      N.setNotify(enabled && allowed ? false : true);     // on but not allowed: ask Android again
+    };
+
+    // a tapped notification for a PC we are not connected to
+    window.connectTo = (id) => {
+      pcs = loadPcs();
+      render();
+      const pc = pickPc(id);
+      if (pc) connect(pc);
+    };
+    function pickPc(id) {
+      const mine = pcs.filter((p) => p.token);
+      return mine.find((p) => p.pc_id === id) || mine.sort((a, b) => (b.last_used || 0) - (a.last_used || 0))[0];
+    }
+
     $("scan").onclick = scan;
     $("find").onclick = findPcs;
     $("manual").onclick = () => openSheet({ title: "输入电脑地址", sub: "地址和配对码都在电脑上「手机连接」页面里", askAddress: true });
     $("foot").textContent = `AutoStudio 手机版 v${N.version()} · 所有任务都在你的电脑上运行`;
     $("help").open = !pcs.length;
     render();
+    renderNotify();
 
-    // open straight into the PC used last time
+    // open straight into the PC used last time (or the one a tapped notification is about)
     if (/[?&]auto=1/.test(location.search)) {
-      const last = pcs.filter((p) => p.token).sort((a, b) => (b.last_used || 0) - (a.last_used || 0))[0];
+      const last = pickPc(new URLSearchParams(location.search).get("pc"));
       if (last) connect(last);
     }
   </script>

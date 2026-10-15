@@ -96,7 +96,7 @@ class TaskScheduler:
         run_id = state.db.start_task_run(task_id, session["id"])
         result: dict[str, Any] = {"text": "", "status": "error"}
 
-        async def go(run: Any) -> None:
+        async def go(run: Any) -> str:
             started = time.time()
             try:
                 result["text"] = await run_agent(run, session["id"], t["prompt"], headless=True,
@@ -121,6 +121,7 @@ class TaskScheduler:
                         await send_webhook(t["webhook"], title, summary or "（无输出）")
                     except Exception as e:  # noqa: BLE001
                         log.warning("webhook failed: %s", e)
+            return summary      # what the phone notification shows
 
         state.runs.start(session["id"], go)
         return session["id"]

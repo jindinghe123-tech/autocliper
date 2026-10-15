@@ -94,3 +94,98 @@ def test_pc_listener_unchanged(ra):
     assert pc.post("/api/remote/pair", json={"code": ra.pairing_code()["code"]}, headers=H).status_code == 400
     evil = TestClient(app, base_url="http://evil.example:8765")
     assert evil.get("/api/sessions").status_code == 403
+
+
+def _paired_phone(ra):
+    phone = TestClient(_Tag(app), base_url="http://192.168.1.20:8766")
+    r = phone.post("/api/remote/pair", json={"code": ra.pairing_code()["code"], "platform": "android"}, headers=H)
+    token = r.json()["token"]
+    return TestClient(_Tag(app), base_url="http://192.168.1.20:8766"), {"Authorization": f"Bearer {token}"}, r.json()
+
+
+def test_events_need_a_paired_phone(ra):
+    stranger = TestClient(_Tag(app), base_url="http://192.168.1.20:8766")
+    r = stranger.get("/api/remote/events")
+    assert r.status_code == 401 and r.json()["code"] == "unpaired"
+    assert stranger.get("/api/remote/events", headers={"Authorization": "Bearer nope"}).status_code == 401
+
+    phone, auth, paired = _paired_phone(ra)
+    r = phone.get("/api/remote/events", headers=auth)
+    assert r.status_code == 200, r.text
+    assert r.json()["boot"] == ra.notices.boot and r.json()["events"] == []
+
+    ra.revoke(paired["device"]["id"])
+    assert phone.get("/api/remote/events", headers=auth).status_code == 401
+
+
+def test_events_feed_cursor_and_long_poll(ra):
+    import threading
+    import time
+
+    phone, auth, _ = _paired_phone(ra)
+    ra.notices.publish({"type": "run_done", "session_id": "old"})
+    first = phone.get("/api/remote/events", headers=auth).json()      # first contact: no backlog
+    assert first["events"] == [] and first["cursor"] == 1
+    q = {"after": first["cursor"], "boot": first["boot"]}
+    assert phone.get("/api/remote/events", params=q, headers=auth).json()["events"] == []
+
+    threading.Timer(0.3, ra.notices.publish, [{"type": "approval_needed", "session_id": "s1"}]).start()
+    t0 = time.monotonic()
+    r = phone.get("/api/remote/events", params={**q, "wait": 20}, headers=auth).json()
+    assert time.monotonic() - t0 < 10
+    assert [e["session_id"] for e in r["events"]] == ["s1"] and r["cursor"] == 2
+
+    # a cursor from before the PC app restarted: read this run's whole feed
+    stale = phone.get("/api/remote/events", params={"after": 5, "boot": "previous"}, headers=auth).json()
+    assert [e["id"] for e in stale["events"]] == [1, 2]
+
+
+def test_runs_notify_done_error_and_approvals():
+    import asyncio
+
+    from autostudio.agent.runs import RunManager
+
+    heard = []
+
+    async def main():
+        rm = RunManager(notify=lambda sid, ev: heard.append((sid, ev["type"])))
+
+        async def ok(run):
+            assert await run.request_approval("a1", "run_command", {}, timeout=0.05) is False
+            return "视频做好了"
+
+        async def boom(run):
+            raise RuntimeError("坏了")
+
+        async def slow(run):
+            await asyncio.sleep(10)
+
+        for sid, fn in (("s1", ok), ("s2", boom), ("s3", slow)):
+            rm.start(sid, fn)
+        await asyncio.sleep(0.01)
+        rm.stop("s3")
+        for sid in ("s1", "s2", "s3"):
+            await rm.wait(sid)
+
+    asyncio.run(main())
+    assert ("s1", "approval_needed") in heard and ("s1", "approval_resolved") in heard
+    assert ("s1", "run_done") in heard and ("s2", "run_error") in heard
+    assert not [h for h in heard if h[0] == "s3"]      # stopping a run yourself is not news
+
+
+def test_run_notice_skips_quick_chats(ra):
+    from autostudio import state
+    from autostudio.server import _run_notice
+
+    chat = state.db.create_session(title="做个视频")
+    task = state.db.create_session(title="⏰ 每日视频", kind="task")
+    _run_notice(chat["id"], {"type": "run_done", "text": "好的", "seconds": 3})
+    _run_notice(chat["id"], {"type": "approval_needed", "name": "run_command", "seconds": 3})
+    _run_notice(task["id"], {"type": "run_done", "text": "**做好了** [看看](out.mp4)", "seconds": 3})
+    _run_notice(chat["id"], {"type": "run_error", "text": "模型\n出错", "seconds": 120})
+    got = list(ra.notices.items)
+    assert [(e["type"], e["session_id"]) for e in got] == [
+        ("approval_needed", chat["id"]), ("run_done", task["id"]), ("run_error", chat["id"])]
+    assert got[0]["label"] == "执行命令" and got[0]["title"] == "做个视频"
+    assert got[1]["task"] is True and got[1]["text"] == "做好了 看看"
+    assert got[2]["text"] == "模型 出错"

@@ -16,6 +16,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -78,6 +79,7 @@ public class MainActivity extends Activity {
     private static final String COOKIE = "as_device";
     private static final int REQ_FILES = 21;
     private static final int REQ_STORAGE = 22;
+    private static final int REQ_NOTIFY = 23;
     private static final int BG = 0xFF0D0E12;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -97,6 +99,18 @@ public class MainActivity extends Activity {
     private WebChromeClient.CustomViewCallback fullscreenCallback;
     private Runnable afterStoragePermission;
     private boolean clearHistoryOnLoad;
+    private String openSession;          // a notification asked for this conversation...
+    private String openSessionPc = "";   // ...on this PC
+
+    // what is on screen, for NotifyJob (which may run while the app is open)
+    private static volatile boolean inFront;
+    private static volatile String frontPc = "";
+    private static volatile String frontUrl = "";
+
+    /** Is the user looking at this conversation right now? Then a notification about it is only noise. */
+    static boolean isShowing(String pc, String session) {
+        return inFront && pc.equals(frontPc) && frontUrl.matches(".*#/chat/" + Pattern.quote(session) + "([/?].*)?");
+    }
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -117,13 +131,62 @@ public class MainActivity extends Activity {
         pcView.setVisibility(View.GONE);
         setupConnectView();
         setupPcView();
-        connectView.loadUrl(CONNECT_URL + "?auto=1");
+        String pick = takeOpenIntent(getIntent()) ? "&pc=" + Uri.encode(openSessionPc) : "";
+        connectView.loadUrl(CONNECT_URL + "?auto=1" + pick);
+        NotifyJob.ensureChannels(this);
+        NotifyJob.schedule(this);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (!takeOpenIntent(intent)) return;
+        if (pcShown && (openSessionPc.isEmpty() || openSessionPc.equals(pcId))) {
+            String sid = openSession;
+            openSession = null;
+            hideFullscreen();
+            goToSession(sid);
+            return;
+        }
+        // another PC (or none yet): the connect screen connects to it, then openPc() opens the conversation
+        if (pcShown) showConnect(event("home", null));
+        connectView.evaluateJavascript("window.connectTo && window.connectTo(" + JSONObject.quote(openSessionPc) + ")", null);
+    }
+
+    /** A tapped notification: remember which conversation to open. */
+    private boolean takeOpenIntent(Intent i) {
+        if (i == null || !NotifyJob.ACTION_OPEN.equals(i.getAction())) return false;
+        String sid = i.getStringExtra(NotifyJob.EXTRA_SESSION);
+        if (sid == null || !sid.matches("[\\w-]+")) return false;
+        String pc = i.getStringExtra(NotifyJob.EXTRA_PC);
+        openSession = sid;
+        openSessionPc = pc == null ? "" : pc;
+        return true;
+    }
+
+    private void goToSession(String sid) {
+        pcView.evaluateJavascript("location.hash=" + JSONObject.quote("#/chat/" + sid), null);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        inFront = true;
         if (pcShown && pcBase != null) checkPcStillThere();
+        connectView.evaluateJavascript("window.onNotifyChanged && window.onNotifyChanged()", null);  // back from Settings
+    }
+
+    @Override
+    protected void onPause() {
+        inFront = false;
+        super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        NotifyJob.follow(this, -1, 0);     // the app is left: keep an ear on whatever still runs on the PC
     }
 
     @Override
@@ -212,6 +275,7 @@ public class MainActivity extends Activity {
     private void showConnect(JSONObject event) {
         hideFullscreen();
         pcShown = false;
+        frontPc = "";
         pcStale = event == null || !"home".equals(event.optString("type"));
         connectView.setVisibility(View.VISIBLE);
         pcView.setVisibility(View.GONE);
@@ -243,6 +307,31 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void savePcs(String json) {
             prefs().edit().putString("pcs", json).apply();
+            NotifyJob.schedule(MainActivity.this);
+        }
+
+        /** {enabled: the user's switch, allowed: Android lets us show notifications}. */
+        @JavascriptInterface
+        public String notifyState() {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("enabled", NotifyJob.enabled(MainActivity.this)).put("allowed", NotifyJob.allowed(MainActivity.this));
+            } catch (JSONException ignored) {
+            }
+            return o.toString();
+        }
+
+        @JavascriptInterface
+        public void setNotify(boolean on) {
+            ui.post(() -> {
+                prefs().edit().putBoolean("notify", on).apply();
+                NotifyJob.schedule(MainActivity.this);
+                if (on) {
+                    if (!NotifyJob.allowed(MainActivity.this)) askNotifyPermission(true);
+                    NotifyJob.follow(MainActivity.this, -1, 0);
+                }
+                connectView.evaluateJavascript("window.onNotifyChanged && window.onNotifyChanged()", null);
+            });
         }
 
         @JavascriptInterface
@@ -331,7 +420,13 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                frontUrl = url == null ? "" : url;     // also called when only the #/chat/... part changes
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
+                frontUrl = url == null ? "" : url;
                 if (clearHistoryOnLoad) {     // Back should not lead to a previous PC or session
                     clearHistoryOnLoad = false;
                     view.clearHistory();
@@ -384,6 +479,7 @@ public class MainActivity extends Activity {
         pcBase = base.replaceAll("/+$", "");
         pcId = id == null ? "" : id;
         pcName = name == null ? "" : name;
+        frontPc = pcId;
         CookieManager cm = CookieManager.getInstance();
         // Lax rather than Strict: WebView.loadUrl must send it, and this WebView only ever shows the PC
         cm.setCookie(pcBase, COOKIE + "=" + token + "; Path=/; Max-Age=34560000; HttpOnly; SameSite=Lax");
@@ -391,12 +487,43 @@ public class MainActivity extends Activity {
         pcShown = true;
         pcView.setVisibility(View.VISIBLE);
         connectView.setVisibility(View.GONE);
+        String sid = openSession != null && (openSessionPc.isEmpty() || openSessionPc.equals(pcId)) ? openSession : null;
+        openSession = null;
         String current = pcView.getUrl();
         if (pcStale || current == null || !isPcUrl(Uri.parse(current))) {
-            pcView.loadUrl(pcBase + "/");
+            pcView.loadUrl(pcBase + "/" + (sid != null ? "#/chat/" + sid : ""));
             clearHistoryOnLoad = true;
+        } else if (sid != null) {
+            goToSession(sid);
         }
         pcStale = false;
+        maybeAskNotifyPermission();
+        NotifyJob.follow(this, -1, 0);
+    }
+
+    /** Ask once, after the first connection, so the phone can buzz when a task on the PC is done. */
+    private void maybeAskNotifyPermission() {
+        if (Build.VERSION.SDK_INT < 33 || !NotifyJob.enabled(this) || NotifyJob.allowed(this)
+                || prefs().getBoolean("notify_asked", false)) return;
+        askNotifyPermission(false);
+    }
+
+    private void askNotifyPermission(boolean fromSwitch) {
+        boolean asked = prefs().getBoolean("notify_asked", false);
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                && (!asked || shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS))) {
+            prefs().edit().putBoolean("notify_asked", true).apply();
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFY);
+        } else if (fromSwitch) {     // turned off for good: only the system settings page can turn it back on
+            toast("请在系统设置里允许 AutoStudio 发送通知");
+            Intent i = Build.VERSION.SDK_INT >= 26
+                    ? new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName())
+                    : new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()));
+            try {
+                startActivity(i);
+            } catch (ActivityNotFoundException ignored) {
+            }
+        }
     }
 
     /** Back from the background: is the PC still reachable, and is this phone still paired? */
@@ -504,6 +631,13 @@ public class MainActivity extends Activity {
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        if (requestCode == REQ_NOTIFY) {
+            if (results.length == 0 || results[0] != PackageManager.PERMISSION_GRANTED) {
+                toast("没有通知权限：电脑上的任务做完时手机不会提醒。可以在连接页面重新打开");
+            }
+            connectView.evaluateJavascript("window.onNotifyChanged && window.onNotifyChanged()", null);
+            return;
+        }
         if (requestCode == REQ_STORAGE) {
             Runnable next = afterStoragePermission;
             afterStoragePermission = null;
@@ -565,13 +699,17 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------ networking
 
     /** Blocking HTTP call. Returns {status, data (parsed JSON) or text, error}; status 0 = unreachable. */
-    private static JSONObject http(String method, String url, String body, String token, int timeoutMs) {
+    static JSONObject http(String method, String url, String body, String token, int timeoutMs) {
+        return http(method, url, body, token, timeoutMs, Math.max(timeoutMs, 4000));
+    }
+
+    static JSONObject http(String method, String url, String body, String token, int connectMs, int readMs) {
         JSONObject out = new JSONObject();
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
-            c.setConnectTimeout(timeoutMs);
-            c.setReadTimeout(Math.max(timeoutMs, 4000));
+            c.setConnectTimeout(connectMs);
+            c.setReadTimeout(readMs);
             c.setRequestMethod(method);
             c.setUseCaches(false);
             c.setRequestProperty("X-AutoStudio", "1");

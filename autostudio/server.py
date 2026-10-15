@@ -31,8 +31,8 @@ from .media import subs as sublib
 from .providers import ProviderError, make_provider
 from .providers.catalog import fetch_chatgpt_catalog
 from .providers.chatgpt_auth import chatgpt_auth
-from .remote import (APK_FILE, COOKIE, COOKIE_MAX_AGE, DEVICE_PATHS, PUBLIC_PATHS, PairError, device_label,
-                     firewall_fix, firewall_status, remote)
+from .remote import (APK_FILE, COOKIE, COOKIE_MAX_AGE, DEVICE_PATHS, NOTICE_MAX_WAIT, PUBLIC_PATHS, PairError,
+                     device_label, firewall_fix, firewall_status, remote)
 from .scheduler import TaskScheduler
 from .tools import CATEGORY_LABELS, REGISTRY
 from .media.tts import EDGE_PERSONAS, TTSError, synthesize
@@ -79,7 +79,7 @@ async def _background_model_sync() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _apply_runtime_settings()
-    state.runs = RunManager()
+    state.runs = RunManager(notify=_run_notice)
     state.scheduler = TaskScheduler()
     state.scheduler.start()
     sync_task = asyncio.create_task(_background_model_sync())
@@ -730,6 +730,37 @@ async def remote_pair(request: Request, body: dict[str, Any] = Body(...)) -> JSO
                          "pc_name": st["pc_name"], "addresses": st["addresses"], "port": st["port"]})
     resp.set_cookie(COOKIE, token, max_age=COOKIE_MAX_AGE, httponly=True, samesite="strict", path="/")
     return resp
+
+
+# A quick chat reply is read on the screen it was asked from; only longer runs (and every scheduled task) buzz
+# the phone when they end. Approvals always do: the run is stuck until someone answers.
+NOTIFY_MIN_SECONDS = 30
+TOOL_LABELS = {"run_command": "执行命令", "social_publish": "发布到社交平台", "studio_run": "写代码处理"}
+
+
+def _run_notice(sid: str, ev: dict[str, Any]) -> None:
+    """Turn a run's lifecycle into phone notifications (see remote.Notices)."""
+    sess = state.db.get_session(sid) or {}
+    task = sess.get("kind") == "task"
+    if ev["type"] in ("run_done", "run_error") and not task and ev.get("seconds", 0) < NOTIFY_MIN_SECONDS:
+        return
+    if ev["type"] == "approval_needed":
+        ev = {**ev, "label": TOOL_LABELS.get(ev.get("name") or "", ev.get("name") or "")}
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", str(ev.get("text") or ""))     # markdown → plain text
+    text = " ".join(re.sub(r"[*`#]+", "", text).split())
+    remote.notices.publish({**ev, "text": text[:300], "session_id": sid, "title": sess.get("title") or "对话",
+                            "task": task})
+
+
+@app.get("/api/remote/events")
+async def remote_events(after: int | None = None, boot: str = "", wait: int = 0) -> dict[str, Any]:
+    """Long poll for the phone app's notifications: runs that finished, failed or wait for approval.
+
+    Call without `after` first to learn where the feed is, then pass back `boot` and `cursor` each time.
+    """
+    events, cursor = await remote.notices.wait(after, boot, min(max(wait, 0), NOTICE_MAX_WAIT))
+    active = sum(1 for r in state.runs.runs.values() if not r.done) if state.runs else 0
+    return {"boot": remote.notices.boot, "cursor": cursor, "events": events, "active": active}
 
 
 @app.get("/api/remote/whoami")
