@@ -5,6 +5,8 @@ import { enhanceCode, markdown } from "./markdown.js";
 import { previewFile } from "./preview.js";
 import { anyProviderReady, modelLabel, modelOptions, navigate, on, providerName, refreshSessions, setActive, store } from "./store.js";
 
+const TOUCH = matchMedia("(pointer: coarse)");
+
 function publishSummary(a) {
   const files = a.video ? [a.video] : a.images || [];
   const lines = [`发布到：${[].concat(a.accounts || []).join("、")}`, `文件：${files.join("、")}`];
@@ -410,7 +412,8 @@ function composer({ onSend, onStop }) {
   };
   ta.addEventListener("input", () => autosize(ta));
   ta.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+    // on a phone's on-screen keyboard Enter makes a new line; the send button sends
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !TOUCH.matches) { e.preventDefault(); send(); }
   });
   ta.addEventListener("paste", (e) => {
     const files = [...(e.clipboardData?.files || [])];
@@ -425,7 +428,7 @@ function composer({ onSend, onStop }) {
         h("button", { class: "btn ghost sm icon-only", title: "添加文件（也可拖拽或粘贴）", html: icon("clip"), onclick: () => fileInput.click() }),
         h("button", { class: "btn ghost sm", title: "从工作区选择", html: icon("folder") + "工作区", onclick: () => navigate("#/files") }),
         h("div", { class: "grow" }),
-        h("span", { class: "small muted" }, h("kbd", {}, "Enter"), " 发送 · ", h("kbd", {}, "Shift+Enter"), " 换行"),
+        h("span", { class: "small muted composer-keys" }, h("kbd", {}, "Enter"), " 发送 · ", h("kbd", {}, "Shift+Enter"), " 换行"),
         sendBtn, fileInput)));
   return {
     el, ta, addFiles, addPaths,

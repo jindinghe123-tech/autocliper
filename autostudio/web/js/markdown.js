@@ -1,4 +1,5 @@
 // Small, safe Markdown renderer (escapes all HTML first).
+import { copyText } from "./dom.js";
 
 const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
@@ -98,7 +99,7 @@ export function enhanceCode(root) {
     b.className = "btn sm copy";
     b.textContent = "复制";
     b.onclick = () => {
-      navigator.clipboard.writeText(pre.querySelector("code")?.innerText || "");
+      copyText(pre.querySelector("code")?.innerText || "");
       b.textContent = "已复制";
       setTimeout(() => (b.textContent = "复制"), 1200);
     };

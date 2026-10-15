@@ -63,6 +63,11 @@ export function providerName(pid) {
   return store.settings?.providers?.[pid]?.name || pid || "";
 }
 
+// Opened from a paired phone (through the phone listener) rather than on the PC itself.
+export const isRemote = () => !!store.meta?.remote;
+// Running inside the AutoStudio Android app (its WebView adds this to the user agent).
+export const inPhoneApp = () => /AutoStudioApp\//.test(navigator.userAgent);
+
 export function navigate(hash) {
   if (location.hash === hash) window.dispatchEvent(new HashChangeEvent("hashchange"));
   else location.hash = hash;

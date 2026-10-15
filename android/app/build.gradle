@@ -1,0 +1,57 @@
+plugins {
+    id "com.android.application"
+}
+
+// Release signing: android/keystore.properties (not in git) points at your keystore:
+//   storeFile=C:/Users/you/.android/autostudio-release.jks
+//   storePassword=...   keyAlias=autostudio   keyPassword=...
+// Without it the release build is signed with the local debug key, which is fine for trying it out.
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file("keystore.properties")
+if (keystoreFile.exists()) keystoreFile.withInputStream { keystoreProps.load(it) }
+
+android {
+    namespace "app.autostudio.mobile"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "app.autostudio.mobile"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        release {
+            if (keystoreProps["storeFile"]) {
+                storeFile file(keystoreProps["storeFile"])
+                storePassword keystoreProps["storePassword"]
+                keyAlias keystoreProps["keyAlias"]
+                keyPassword keystoreProps["keyPassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            signingConfig keystoreProps["storeFile"] ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "com.journeyapps:zxing-android-embedded:4.3.0"
+}

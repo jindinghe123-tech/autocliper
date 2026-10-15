@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>AutoStudio</title>
+  <style>
+    /* same look as the desktop app (autostudio/web/style.css) */
+    :root {
+      --bg: #0d0e12; --bg-2: #111318; --panel: #15171d; --panel-2: #1b1e26; --panel-3: #222632;
+      --border: #262a35; --border-2: #323746; --text: #e8eaf0; --text-2: #b4b9c6; --muted: #7d8394;
+      --accent: #8b5cf6; --accent-2: #22d3ee; --accent-soft: rgba(139, 92, 246, .14);
+      --grad: linear-gradient(135deg, #8b5cf6 0%, #6366f1 45%, #22d3ee 100%);
+      --ok: #22c55e; --warn: #f59e0b; --err: #f43f5e;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+      --mono: "JetBrains Mono", "Cascadia Code", Consolas, Menlo, monospace;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; min-height: 100%; }
+    body { background: var(--bg); color: var(--text); font: 14px/1.6 var(--font); -webkit-font-smoothing: antialiased; }
+    a { color: var(--accent-2); text-decoration: none; }
+    button, input { font: inherit; color: inherit; }
+    .icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: 11px;
+      border: 1px solid var(--border-2); background: var(--panel-2); cursor: pointer; font-size: 14px; white-space: nowrap; }
+    .btn:active { background: var(--panel-3); }
+    .btn:disabled { opacity: .5; }
+    .btn.primary { background: var(--grad); border-color: transparent; color: #fff; font-weight: 600; box-shadow: 0 6px 18px rgba(99, 102, 241, .3); }
+    .btn.big { height: 52px; font-size: 16px; border-radius: 14px; width: 100%; }
+    .btn.sm { height: 32px; padding: 0 12px; font-size: 13px; border-radius: 9px; }
+    .btn.ghost { background: transparent; border-color: transparent; }
+    .btn.danger { color: var(--err); }
+    .input { width: 100%; background: var(--panel); border: 1px solid var(--border-2); border-radius: 11px; padding: 11px 13px; outline: none; }
+    .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+    .tag { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; background: var(--panel-3); color: var(--text-2); border: 1px solid var(--border); }
+    .tag.ok { color: var(--ok); background: rgba(34, 197, 94, .1); border-color: rgba(34, 197, 94, .25); }
+    .tag.warn { color: var(--warn); background: rgba(245, 158, 11, .1); border-color: rgba(245, 158, 11, .25); }
+    .muted { color: var(--muted); }
+    .small { font-size: 12.5px; }
+    .spinner { width: 22px; height: 22px; border: 2.5px solid var(--border-2); border-top-color: var(--accent-2); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .wrap { max-width: 480px; margin: 0 auto; padding: 22px 18px 40px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; }
+    .brand-logo { width: 32px; height: 32px; border-radius: 10px; background: var(--grad); display: grid; place-items: center; box-shadow: 0 6px 18px rgba(99, 102, 241, .35); }
+    .brand-logo svg { width: 17px; height: 17px; stroke: #fff; stroke-width: 2.2; }
+    h1 { font-size: 26px; line-height: 1.25; margin: 28px 0 6px; letter-spacing: -.3px; }
+    .grad-text { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .lead { color: var(--text-2); margin: 0 0 22px; }
+    .section { font-size: 12px; color: var(--muted); letter-spacing: .06em; margin: 26px 2px 10px; }
+
+    .notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 12px; margin-bottom: 16px; font-size: 13.5px;
+      background: var(--panel); border: 1px solid var(--border); color: var(--text); }
+    .notice.err { border-color: rgba(244, 63, 94, .45); background: rgba(244, 63, 94, .08); }
+    .notice.warn { border-color: rgba(245, 158, 11, .45); background: rgba(245, 158, 11, .08); }
+    .notice .icon { margin-top: 2px; }
+    .notice .acts { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+
+    .pcs { display: grid; gap: 10px; }
+    .pc { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--border); cursor: pointer; }
+    .pc:active { background: var(--panel-2); }
+    .pc-ico { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; background: var(--accent-soft); color: #a78bfa; flex: none; }
+    .pc-main { flex: 1; min-width: 0; }
+    .pc-name { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pc-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .actions { display: grid; gap: 10px; margin-top: 18px; }
+    .actions .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+    details.help { margin-top: 24px; }
+    details.help summary { cursor: pointer; color: var(--text-2); list-style: none; display: flex; align-items: center; gap: 6px; }
+    details.help summary::-webkit-details-marker { display: none; }
+    details.help ol { padding-left: 20px; margin: 10px 0 0; color: var(--text-2); display: grid; gap: 6px; }
+    .foot { text-align: center; color: var(--muted); font-size: 12px; margin-top: 30px; }
+
+    .overlay { position: fixed; inset: 0; background: rgba(5, 6, 10, .72); backdrop-filter: blur(4px); z-index: 50; display: none; }
+    .overlay.show { display: grid; }
+    .busy { place-items: center; text-align: center; }
+    .busy .box { display: grid; gap: 14px; justify-items: center; padding: 24px; }
+    .sheet { align-items: end; }
+    .sheet .panel { background: var(--panel); border: 1px solid var(--border-2); border-radius: 20px 20px 0 0; padding: 20px 18px 24px; width: 100%; max-width: 520px; margin: 0 auto;
+      animation: up .18s ease-out; }
+    @keyframes up { from { transform: translateY(30px); opacity: 0; } }
+    .sheet h3 { margin: 0 0 4px; font-size: 17px; }
+    .field { display: grid; gap: 6px; margin-top: 14px; }
+    .field label { font-size: 12.5px; color: var(--text-2); font-weight: 600; }
+    .code { font-family: var(--mono); font-size: 28px; letter-spacing: .4em; text-align: center; padding-left: 22px; }
+    .sheet .err { color: var(--err); font-size: 13px; min-height: 18px; margin-top: 8px; }
+    .sheet .btns { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; margin-top: 12px; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand"><div class="brand-logo"><svg class="icon" viewBox="0 0 24 24"><path d="m6 4 14 8-14 8z"/></svg></div>AutoStudio</div>
+    <h1>连接你的<span class="grad-text">电脑</span></h1>
+    <p class="lead">AutoStudio 在电脑上运行。手机连上电脑后，就能远程发任务、看进度、看做好的视频，界面和电脑上一样。</p>
+
+    <div id="notice" class="hidden"></div>
+
+    <div id="mine" class="hidden">
+      <div class="section">我的电脑</div>
+      <div class="pcs" id="pcs"></div>
+    </div>
+
+    <div class="actions">
+      <button class="btn primary big" id="scan"><svg class="icon" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/></svg>扫码连接</button>
+      <div class="row">
+        <button class="btn" id="find"><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>搜索电脑</button>
+        <button class="btn" id="manual"><svg class="icon" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>输入地址</button>
+      </div>
+    </div>
+
+    <div id="found-wrap" class="hidden">
+      <div class="section">局域网里找到的电脑</div>
+      <div class="pcs" id="found"></div>
+    </div>
+
+    <details class="help" id="help">
+      <summary><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>第一次用？三步连上</summary>
+      <ol>
+        <li>在电脑上打开 AutoStudio（双击 AutoStudio.bat）。</li>
+        <li>点左边的「手机连接」，打开开关，屏幕上会出现二维码和 6 位配对码。</li>
+        <li>回到这里点「扫码连接」，扫电脑屏幕上的二维码。</li>
+      </ol>
+      <p class="small muted" style="margin:10px 0 0">手机和电脑要连同一个 Wi-Fi。不在家也想用：电脑和手机都装上 Tailscale 并登录同一个账号，再扫一次码就行。</p>
+    </details>
+
+    <div class="foot" id="foot">所有任务都在你的电脑上运行</div>
+  </div>
+
+  <div class="overlay busy" id="busy"><div class="box"><div class="spinner"></div><div id="busy-text"></div>
+    <button class="btn sm ghost" id="busy-cancel">取消</button></div></div>
+
+  <div class="overlay sheet" id="sheet"><div class="panel">
+    <h3 id="sheet-title">连接到电脑</h3>
+    <div class="small muted" id="sheet-sub">输入电脑上「手机连接」页面显示的 6 位配对码</div>
+    <div class="field" id="addr-field"><label for="addr">电脑地址</label>
+      <input class="input" id="addr" inputmode="url" autocapitalize="off" autocomplete="off" placeholder="例如 192.168.1.5:8766"></div>
+    <div class="field"><label for="code">配对码</label>
+      <input class="input code" id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000"></div>
+    <div class="err" id="sheet-err"></div>
+    <div class="btns"><button class="btn" id="sheet-cancel">取消</button><button class="btn primary" id="sheet-ok">连接</button></div>
+  </div></div>
+
+  <script>
+    "use strict";
+    const N = window.AutoStudio;
+    const DEFAULT_PORT = 8766;
+    const $ = (id) => document.getElementById(id);
+    const ICON = {
+      monitor: '<svg class="icon" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+      alert: '<svg class="icon" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+      info: '<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>',
+      more: '<svg class="icon" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>',
+    };
+
+    function h(tag, props, ...kids) {
+      const el = document.createElement(tag);
+      for (const [k, v] of Object.entries(props || {})) {
+        if (v == null || v === false) continue;
+        if (k === "class") el.className = v;
+        else if (k === "html") el.innerHTML = v;
+        else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+        else el.setAttribute(k, v);
+      }
+      for (const c of kids.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
+      return el;
+    }
+
+    // ---- talking to Java: N.method(callbackId, ...) answers through window.__native(callbackId, payload)
+    const pending = {};
+    let seq = 0;
+    function call(method, ...args) {
+      return new Promise((resolve) => { const id = "c" + (++seq); pending[id] = resolve; N[method](id, ...args); });
+    }
+    window.__native = (id, payload) => { const f = pending[id]; delete pending[id]; if (f) f(payload || {}); };
+
+    // ---- saved PCs: [{pc_id, pc_name, token, base, addresses:[urls], last_used}]
+    let pcs = loadPcs();
+    function loadPcs() { try { const v = JSON.parse(N.getPcs() || "[]"); return Array.isArray(v) ? v : []; } catch (e) { return []; } }
+    function savePcs() { N.savePcs(JSON.stringify(pcs)); render(); }
+    const hostOf = (base) => String(base || "").replace(/^https?:\/\//, "");
+    const portOf = (base) => Number((/:(\d+)$/.exec(hostOf(base)) || [])[1]) || DEFAULT_PORT;
+    const urlsFrom = (addresses, port) => (addresses || []).map((a) => `http://${a.ip}:${port}`);
+    function allPorts() { return [...new Set([DEFAULT_PORT, ...pcs.map((p) => portOf(p.base))])]; }
+
+    // ---- UI helpers
+    function notice(msg, kind = "", actions = []) {
+      const box = $("notice");
+      if (!msg) { box.className = "hidden"; box.innerHTML = ""; return; }
+      box.className = `notice ${kind}`;
+      box.innerHTML = "";
+      box.append(h("span", { html: kind ? ICON.alert : ICON.info }),
+        h("div", {}, h("div", {}, msg), actions.length ? h("div", { class: "acts" },
+          actions.map(([label, fn]) => h("button", { class: "btn sm", onclick: fn }, label))) : null));
+      window.scrollTo(0, 0);
+    }
+
+    let attempt = 0;      // bumping it makes in-flight work stale (cancel)
+    function busy(text) {
+      $("busy").classList.toggle("show", !!text);
+      $("busy-text").textContent = text || "";
+    }
+    $("busy-cancel").onclick = () => { attempt++; busy(null); };
+
+    function ago(ts) {
+      if (!ts) return "";
+      const m = Math.round((Date.now() - ts) / 60000);
+      if (m < 1) return "刚刚";
+      if (m < 60) return `${m} 分钟前`;
+      if (m < 1440) return `${Math.round(m / 60)} 小时前`;
+      return `${Math.round(m / 1440)} 天前`;
+    }
+
+    function render() {
+      const list = $("pcs");
+      list.innerHTML = "";
+      $("mine").classList.toggle("hidden", !pcs.length);
+      for (const pc of [...pcs].sort((a, b) => (b.last_used || 0) - (a.last_used || 0))) {
+        list.append(h("div", { class: "pc", onclick: () => (pc.token ? connect(pc) : scan()) },
+          h("div", { class: "pc-ico", html: ICON.monitor }),
+          h("div", { class: "pc-main" },
+            h("div", { class: "pc-name" }, pc.pc_name || "电脑"),
+            h("div", { class: "pc-sub" }, pc.token ? `${hostOf(pc.base)}${pc.last_used ? " · " + ago(pc.last_used) + "用过" : ""}` : "需要重新配对：点这里扫码")),
+          pc.token ? h("span", { class: "btn sm primary" }, "连接") : h("span", { class: "tag warn" }, "已断开"),
+          h("button", { class: "btn sm ghost", html: ICON.more, onclick: (e) => { e.stopPropagation(); remove(pc); } })));
+      }
+    }
+
+    function remove(pc) {
+      if (!confirm(`从列表里移除「${pc.pc_name}」？\n（要在电脑上的「手机连接」里把这台手机也断开，才会彻底失效）`)) return;
+      pcs = pcs.filter((x) => x !== pc);
+      savePcs();
+    }
+
+    // ---- connecting to a paired PC
+    async function connect(pc) {
+      const my = ++attempt;
+      notice(null);
+      busy(`正在连接「${pc.pc_name}」…`);
+      const bases = [...new Set([pc.base, ...(pc.addresses || [])].filter(Boolean))];
+      for (const base of bases) {
+        const r = await call("request", "GET", base + "/api/remote/whoami", "", pc.token, 2500);
+        if (my !== attempt) return;
+        if (r.status === 200 && r.data) return enter(pc, base, r.data);
+        if (r.status === 401) return revoked(pc);
+      }
+      // not at any address we know: its IP may have changed, look for it on the network
+      busy(`在局域网里寻找「${pc.pc_name}」…`);
+      const d = await call("discover", allPorts().join(","));
+      if (my !== attempt) return;
+      const hit = (d.pcs || []).find((x) => x.pc_id === pc.pc_id);
+      if (hit) {
+        const r = await call("request", "GET", hit.base + "/api/remote/whoami", "", pc.token, 3000);
+        if (my !== attempt) return;
+        if (r.status === 200 && r.data) return enter(pc, hit.base, r.data);
+        if (r.status === 401) return revoked(pc);
+      }
+      busy(null);
+      notice(`连不上「${pc.pc_name}」。请检查：① 电脑上的 AutoStudio 开着；② 电脑上「手机连接」的开关是打开的；③ 手机和电脑连的是同一个 Wi-Fi；④ 电脑上的 Windows 防火墙允许了 Python（第一次打开「手机连接」时弹出的提示要点「允许」）。`,
+        "err", [["重试", () => connect(pc)], ["扫码重新连接", scan]]);
+    }
+
+    function enter(pc, base, who) {
+      pc.base = base;
+      pc.pc_name = who.pc_name || pc.pc_name;
+      if (who.addresses) pc.addresses = urlsFrom(who.addresses, who.port || portOf(base));
+      pc.last_used = Date.now();
+      savePcs();
+      busy(null);
+      notice(null);
+      N.open(base, pc.token, pc.pc_id, pc.pc_name);
+    }
+
+    function revoked(pc) {
+      pc.token = null;
+      savePcs();
+      busy(null);
+      notice(`电脑「${pc.pc_name}」已经断开了这台手机。在电脑上打开「手机连接」，再扫码配对一次就好。`, "warn", [["扫码配对", scan]]);
+    }
+
+    // ---- pairing with a PC
+    async function pairWith(base, code) {
+      const my = ++attempt;
+      busy("正在配对…");
+      const r = await call("request", "POST", base + "/api/remote/pair",
+        JSON.stringify({ code, name: N.deviceName(), platform: "android" }), "", 6000);
+      if (my !== attempt) return { ok: false, msg: "" };
+      busy(null);
+      if (r.status !== 200 || !r.data || !r.data.token) {
+        if (r.status === 0) return { ok: false, msg: `连不上 ${hostOf(base)}。确认电脑上「手机连接」已打开，并且手机和电脑在同一个 Wi-Fi。` };
+        return { ok: false, msg: (r.data && r.data.detail) || `配对失败（HTTP ${r.status}）` };
+      }
+      const d = r.data;
+      let pc = pcs.find((x) => x.pc_id === d.pc_id);
+      if (!pc) { pc = { pc_id: d.pc_id }; pcs.push(pc); }
+      Object.assign(pc, { pc_name: d.pc_name, token: d.token, base, paired_at: Date.now() });
+      enter(pc, base, { pc_name: d.pc_name, port: d.port, addresses: d.addresses });
+      return { ok: true };
+    }
+
+    function parsePairLink(text) {
+      const m = /^(https?:\/\/[^\/?#\s]+)\/pair(?:[?#](\d{6}))?/i.exec(String(text || "").trim());
+      return m ? { base: m[1], code: m[2] || "" } : null;
+    }
+
+    function normalizeBase(s) {
+      s = String(s || "").trim().replace(/\/pair.*$/i, "").replace(/\/+$/, "");
+      if (!s) return null;
+      if (!/^https?:\/\//i.test(s)) s = "http://" + s;
+      try {
+        const u = new URL(s);
+        return `${u.protocol}//${u.hostname}:${u.port || DEFAULT_PORT}`;
+      } catch (e) { return null; }
+    }
+
+    // ---- the code sheet (also used for typing an address by hand)
+    let sheetDone = null;
+    function openSheet({ title, sub, base, askAddress }) {
+      $("sheet-title").textContent = title;
+      $("sheet-sub").textContent = sub || "输入电脑上「手机连接」页面显示的 6 位配对码";
+      $("addr-field").classList.toggle("hidden", !askAddress);
+      $("addr").value = "";
+      $("code").value = "";
+      $("sheet-err").textContent = "";
+      $("sheet").classList.add("show");
+      setTimeout(() => (askAddress ? $("addr") : $("code")).focus(), 120);
+      sheetDone = async () => {
+        const b = askAddress ? normalizeBase($("addr").value) : base;
+        const code = $("code").value.replace(/\D/g, "");
+        if (!b) { $("sheet-err").textContent = "地址不对，例如 192.168.1.5:8766"; return; }
+        if (code.length !== 6) { $("sheet-err").textContent = "配对码是 6 位数字"; return; }
+        $("sheet-ok").disabled = true;
+        const r = await pairWith(b, code);
+        $("sheet-ok").disabled = false;
+        if (r.ok) closeSheet();
+        else if (r.msg) $("sheet-err").textContent = r.msg;
+      };
+    }
+    function closeSheet() { $("sheet").classList.remove("show"); sheetDone = null; }
+    $("sheet-cancel").onclick = closeSheet;
+    $("sheet-ok").onclick = () => sheetDone && sheetDone();
+    $("code").addEventListener("input", (e) => { e.target.value = e.target.value.replace(/\D/g, "").slice(0, 6); });
+    $("code").addEventListener("keydown", (e) => { if (e.key === "Enter" && sheetDone) sheetDone(); });
+    $("sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
+
+    // ---- scanning
+    function scan() { notice(null); N.scan(); }
+    window.onScan = (res) => {
+      const text = res && res.text;
+      if (!text) return;
+      const link = parsePairLink(text);
+      if (!link) { notice("这不是 AutoStudio 的配对二维码。请扫电脑上「手机连接」页面里的二维码。", "err"); return; }
+      if (link.code) {
+        pairWith(link.base, link.code).then((r) => {
+          if (!r.ok && r.msg) notice(r.msg, "err", [["重新扫码", scan]]);
+        });
+      } else {
+        openSheet({ title: `连接到 ${hostOf(link.base)}`, base: link.base });
+      }
+    };
+
+    // ---- finding PCs on the network
+    async function findPcs() {
+      const my = ++attempt;
+      notice(null);
+      busy("正在搜索局域网里的电脑…");
+      const d = await call("discover", allPorts().join(","));
+      if (my !== attempt) return;
+      busy(null);
+      const list = $("found");
+      list.innerHTML = "";
+      const found = d.pcs || [];
+      $("found-wrap").classList.toggle("hidden", !found.length);
+      if (!found.length) {
+        notice((d.networks || []).length
+          ? "没找到。请确认电脑上 AutoStudio 开着、「手机连接」已打开，并且手机和电脑在同一个 Wi-Fi。也可以扫码或输入地址。"
+          : "手机现在没连 Wi-Fi。连上和电脑同一个 Wi-Fi 后再搜索。", "warn");
+        return;
+      }
+      for (const f of found) {
+        const mine = pcs.find((p) => p.pc_id === f.pc_id && p.token);
+        list.append(h("div", { class: "pc", onclick: () => {
+          if (mine) { mine.base = f.base; connect(mine); } else openSheet({ title: `连接到「${f.pc_name}」`, base: f.base });
+        } },
+          h("div", { class: "pc-ico", html: ICON.monitor }),
+          h("div", { class: "pc-main" }, h("div", { class: "pc-name" }, f.pc_name), h("div", { class: "pc-sub" }, hostOf(f.base))),
+          mine ? h("span", { class: "tag ok" }, "已配对") : h("span", { class: "btn sm" }, "配对")));
+      }
+    }
+
+    // ---- events from Java (the PC view went away)
+    window.onAppEvent = (ev) => {
+      pcs = loadPcs();
+      const pc = pcs.find((x) => x.pc_id === ev.pc_id);
+      if (ev.type === "revoked" || ev.type === "disconnected") {
+        if (pc) { pc.token = null; savePcs(); }
+        notice(ev.type === "disconnected" ? `已断开和「${ev.pc_name}」的连接。`
+          : `电脑「${ev.pc_name}」已经断开了这台手机，需要重新配对。`, "warn", [["扫码配对", scan]]);
+      } else if (ev.type === "unreachable") {
+        notice(`和「${ev.pc_name}」的连接断开了：电脑可能关机了、AutoStudio 退出了，或者手机换了网络。`, "err",
+          pc && pc.token ? [["重新连接", () => connect(pc)]] : []);
+      } else {
+        notice(null);
+      }
+      render();
+    };
+
+    $("scan").onclick = scan;
+    $("find").onclick = findPcs;
+    $("manual").onclick = () => openSheet({ title: "输入电脑地址", sub: "地址和配对码都在电脑上「手机连接」页面里", askAddress: true });
+    $("foot").textContent = `AutoStudio 手机版 v${N.version()} · 所有任务都在你的电脑上运行`;
+    $("help").open = !pcs.length;
+    render();
+
+    // open straight into the PC used last time
+    if (/[?&]auto=1/.test(location.search)) {
+      const last = pcs.filter((p) => p.token).sort((a, b) => (b.last_used || 0) - (a.last_used || 0))[0];
+      if (last) connect(last);
+    }
+  </script>
+</body>
+</html>

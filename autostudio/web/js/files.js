@@ -1,8 +1,8 @@
 // Workspace file browser.
-import { get, rawUrl, upload } from "./api.js";
+import { get, rawUrl, thumbUrl, upload } from "./api.js";
 import { KIND_ICON, fmtSize, fmtTime, h, icon, modal, toast } from "./dom.js";
 import { previewFile, reveal, subtitleEditorHash } from "./preview.js";
-import { navigate, store } from "./store.js";
+import { isRemote, navigate, store } from "./store.js";
 
 let currentPath = "";
 
@@ -22,7 +22,7 @@ export async function showFiles(main, params) {
       h("button", { class: "btn ghost icon-only menu-btn", html: icon("menu"), onclick: () => document.getElementById("sidebar").classList.toggle("open") }),
       h("h1", {}, "文件"), h("div", { class: "grow" }),
       h("button", { class: "btn sm", html: icon("refresh"), title: "刷新", onclick: () => load(currentPath) }),
-      h("button", { class: "btn sm", html: icon("folder") + "在资源管理器中打开", onclick: () => reveal(currentPath || store.meta?.workspace) }),
+      isRemote() ? null : h("button", { class: "btn sm", html: icon("folder") + "在资源管理器中打开", onclick: () => reveal(currentPath || store.meta?.workspace) }),
       h("button", { class: "btn sm primary", html: icon("upload") + "上传", onclick: () => input.click() }), input),
     h("div", { class: "page-body" }, h("div", { style: { maxWidth: "1200px", margin: "0 auto" } },
       h("div", { class: "row", style: { marginBottom: "16px" } }, crumbs), grid)));
@@ -50,9 +50,10 @@ export async function showFiles(main, params) {
 
   function tile(it) {
     const thumb = h("div", { class: "thumb" });
-    if (it.kind === "image") thumb.append(h("img", { src: rawUrl(it.path), loading: "lazy" }));
-    else if (it.kind === "video") thumb.append(h("video", { src: rawUrl(it.path) + "#t=0.5", preload: "metadata", muted: true }));
-    else thumb.innerHTML = icon(KIND_ICON[it.kind] || "file");
+    if (it.kind === "image" || it.kind === "video") {
+      thumb.append(h("img", { src: thumbUrl(it.path), loading: "lazy", alt: "",
+        onerror: () => { thumb.innerHTML = icon(KIND_ICON[it.kind]); } }));
+    } else thumb.innerHTML = icon(KIND_ICON[it.kind] || "file");
     const acts = h("div", { class: "acts" });
     if (!it.is_dir) {
       acts.append(h("button", { class: "btn sm icon-only", title: "在对话中使用", html: icon("chat"), onclick: (e) => {

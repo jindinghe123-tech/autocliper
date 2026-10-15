@@ -6,3 +6,7 @@
 *.svg text
 site/ export-ignore
 wrangler.jsonc export-ignore
+gradlew text eol=lf
+*.apk binary
+*.jar binary
+android/ export-ignore

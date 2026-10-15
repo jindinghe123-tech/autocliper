@@ -13,6 +13,7 @@ export async function api(path, { method = "GET", body, raw = false } = {}) {
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!res.ok) {
+    if (res.status === 401 && data?.code === "unpaired") location.href = "/pair"; // this phone was disconnected on the PC
     const msg = (data && (data.detail || data.message)) || `HTTP ${res.status}`;
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
   }
@@ -27,6 +28,14 @@ export const del = (p) => api(p, { method: "DELETE" });
 
 export function rawUrl(path) {
   return `/api/files/raw?path=${encodeURIComponent(path)}`;
+}
+
+export function downloadUrl(path, name = "") {
+  return `${rawUrl(path)}&download=1${name ? `&name=${encodeURIComponent(name)}` : ""}`;
+}
+
+export function thumbUrl(path, w = 360) {
+  return `/api/thumb?w=${w}&path=${encodeURIComponent(path)}`;
 }
 
 export async function upload(files) {

@@ -3,18 +3,22 @@ import { del, get } from "./api.js";
 import { showChat, stopChatView } from "./chat.js";
 import { confirmDialog, h, icon, toast } from "./dom.js";
 import { showFiles } from "./files.js";
+import { disconnectThisPhone, showPhone, stopPhoneView } from "./phone.js";
 import { showSettings } from "./settings.js";
 import { showPublish, stopPublishView } from "./social.js";
-import { anyProviderReady, emit, modelLabel, navigate, on, providerName, refreshSessions, refreshSettings, store } from "./store.js";
+import { anyProviderReady, emit, inPhoneApp, modelLabel, navigate, on, providerName, refreshSessions, refreshSettings, store } from "./store.js";
 import { showSubtitles, stopSubtitleView } from "./subtitles.js";
 import { showTasks } from "./tasks.js";
+import { showWorks } from "./works.js";
 
 const NAV = [
   ["#/chat", "chat", "对话"],
+  ["#/works", "film", "作品"],
   ["#/subtitles", "captions", "字幕编辑"],
   ["#/tasks", "clock", "定时任务"],
   ["#/publish", "upload", "发布"],
   ["#/files", "folder", "文件"],
+  ["#/phone", "phone", "手机连接"],
   ["#/settings", "settings", "设置"],
 ];
 
@@ -38,8 +42,14 @@ function buildSidebar() {
     renderTheme();
   };
   renderTheme();
+  const remote = store.meta?.remote;
   sb.append(
-    h("div", { class: "brand" }, h("div", { class: "brand-logo", html: icon("play") }), "AutoStudio", h("small", {}, `v${store.meta?.version || ""}`)),
+    h("div", { class: "brand" }, h("div", { class: "brand-logo", html: icon("play") }), "AutoStudio", h("small", {}, `v${store.meta?.version || ""}`),
+      inPhoneApp() ? h("button", { class: "btn ghost sm icon-only brand-close", html: icon("x"), title: "收起", onclick: () => sb.classList.remove("open") }) : null),
+    ...(remote ? [h("div", { class: "remote-chip", title: "手机连接", onclick: () => { navigate("#/phone"); sb.classList.remove("open"); } },
+      h("span", { class: "status-dot ok" }), h("span", { class: "t" }, `已连接 · ${remote.pc_name}`),
+      h("button", { class: "btn ghost sm", onclick: (e) => { e.stopPropagation(); inPhoneApp() ? (location.href = "autostudio://home") : disconnectThisPhone(); } },
+        inPhoneApp() ? "切换" : "断开"))] : []),
     h("button", { class: "btn primary new-chat", html: icon("plus") + "新对话", onclick: () => { navigate("#/chat"); sb.classList.remove("open"); } }),
     nav, h("div", { class: "side-title" }, "最近"), sessions,
     h("div", { class: "side-foot" }, chip, themeBtn));
@@ -77,6 +87,10 @@ function buildSidebar() {
   });
   renderChip();
   renderSessions();
+  // phone layout: the sidebar is a drawer; tapping the page behind it closes it
+  document.getElementById("main").addEventListener("click", (e) => {
+    if (sb.classList.contains("open") && !e.target.closest(".menu-btn")) sb.classList.remove("open");
+  });
 }
 
 function currentSessionId() {
@@ -93,8 +107,12 @@ async function route() {
   stopChatView();
   stopSubtitleView();
   stopPublishView();
+  stopPhoneView();
+  document.getElementById("sidebar").classList.remove("open");
   try {
     switch (parts[0]) {
+      case "works": await showWorks(main); break;
+      case "phone": await showPhone(main); break;
       case "subtitles": await showSubtitles(main, params); break;
       case "tasks": await showTasks(main); break;
       case "publish": await showPublish(main); break;

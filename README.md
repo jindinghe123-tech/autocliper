@@ -40,6 +40,7 @@ AutoStudio 不是“给建议”的聊天机器人，而是一个**会动手的 
 | 🖼️ **封面 / GIF / 截图** | 一键生成带大标题的封面图 |
 | 🌐 **下载与网页** | 下载 B 站 / YouTube 等视频（yt-dlp），抓取网页正文、RSS |
 | 📮 **一键发布** | 发布到 **小红书**（视频 / 图文笔记）和 **YouTube**（含 Shorts），每个平台都能添加**多个账号**，一次发到多个账号；定时任务产出的内容先进「待确认」，点一下才发 |
+| 📱 **手机远程控制** | 安卓 App / iPhone 浏览器连上你的电脑，界面和电脑上一模一样：发任务、看进度、批准操作、看做好的视频并一键存到手机相册；任务都在电脑上跑。手机必须先在电脑上扫码配对才能连接 |
 | ⏰ **每日自动任务** | cron 定时运行 Agent，结果推送到 **飞书 / 钉钉 / 企业微信 / Telegram / Discord / Slack / Server酱 / Bark** |
 | 🧠 **长期记忆** | 记住你的偏好（字幕样式、频道风格、常用素材目录） |
 
@@ -143,6 +144,20 @@ Agent 缺画面、缺音乐、缺音效时会自己去找：`asset_search` 返�
 在对话里直接说「发到我的小红书和 YouTube」即可；Agent 会按平台分别写标题和文案。发布前默认会征求你的同意（发布页可改）。
 定时任务产出的内容默认进入「待确认」，任务完成后推送里会提醒你；在任务里勾选「直接发出」才会全自动发布。
 
+## 📱 用手机控制电脑
+
+AutoStudio 始终在电脑上运行，手机只是一个遥控器 + 屏幕：看到的就是电脑上的界面，发出的任务在电脑上跑，做好的视频可以直接在手机上播放、保存到相册。
+
+1. 电脑上打开 AutoStudio，点左侧 **手机连接**，打开开关。屏幕上会出现二维码和 6 位配对码（第一次开启时 Windows 可能弹防火墙提示，勾选「专用网络」并允许）
+2. 手机和电脑连同一个 Wi-Fi：
+   - **安卓**：装 **AutoStudio App**，点「扫码连接」扫电脑上的二维码。还没装的话，用手机相机 / 浏览器扫码，打开的页面里就有 App 下载按钮（App 由你的电脑直接提供，不经过任何第三方）
+   - **iPhone**：用相机扫码，在 Safari 里输入配对码；连上后「分享 → 添加到主屏幕」，以后从桌面打开
+3. 以后打开 App 会自动连上上次的电脑；电脑换了 IP 也会自己在局域网里找回来。左侧「作品」页可以看所有成片
+
+安全：手机连接默认关闭，打开后才会监听局域网端口（默认 8766）；除了配对页，所有请求都必须带已配对设备的令牌，配对码只显示在电脑屏幕上、10 分钟有效、用一次就换、输错 8 次作废。电脑上的「手机连接」页面能看到所有已配对设备，随时可以断开。不在家也想用：电脑和手机都装上 [Tailscale](https://tailscale.com) 并登录同一个账号，用 100.x 开头的地址配对即可。
+
+安卓 App 的源码在 `android/`（原生 WebView 外壳 + 扫码 + 局域网发现 + 保存到相册），编译好的安装包随程序一起放在 `autostudio/app/AutoStudio.apk`。
+
 ## ⏰ 每日自动任务
 
 在 **定时任务** 页面新建（或直接在对话里说“每天 xx 点帮我……”）。到点后 AutoStudio 会开启一个新对话，以无人值守模式执行指令，并把结果推送到你填写的 Webhook。
@@ -172,8 +187,11 @@ autostudio/
 ├── media/          # ffmpeg 封装、字幕格式与断句、语音识别、节拍检测、TTS 引擎
 ├── social/         # 社交发布：多账号、待确认队列、YouTube API、小红书网页自动化
 ├── scheduler.py    # cron 定时任务 + Webhook 推送
+├── remote.py       # 手机连接：配对码、设备令牌、局域网监听
 ├── server.py       # FastAPI：REST + SSE
-└── web/            # 前端（原生 JS，无需构建）
+├── app/            # 编译好的安卓 App（电脑通过「手机连接」直接分发给手机）
+└── web/            # 前端（原生 JS，无需构建；电脑和手机共用同一套界面）
+android/            # 安卓 App 源码（Java，./gradlew assembleRelease）
 ```
 
 **添加一个新工具**只需要一个装饰器：
@@ -195,6 +213,7 @@ async def video_mirror(ctx: ToolContext, input: str):
 ## 🔒 安全与隐私
 
 - 服务默认只监听 `127.0.0.1`，并拦截跨站请求（防止网页偷偷调用本地 Agent）
+- 「手机连接」默认关闭；打开后局域网端口上的每个请求都要验证已配对设备的令牌（只保存哈希），可随时在电脑上断开某台设备
 - API Key 和 ChatGPT 令牌只保存在本机 `~/.autostudio/`，只会发送给对应的服务商
 - 执行命令行需要你逐次批准（可在设置里调整）；Agent 不会删除文件（只会移到工作区 `.trash/`）
 - 不要用 `--host 0.0.0.0` 把服务暴露到公网
@@ -213,6 +232,16 @@ python -m autostudio --no-browser   # 修改前端后刷新浏览器即可，无
 ```
 
 数据目录可用环境变量 `AUTOSTUDIO_HOME` 指定（便于测试）。
+
+安卓 App：需要 JDK 17 和 Android SDK（`android/local.properties` 写 `sdk.dir=...`）。
+
+```bash
+cd android
+./gradlew assembleRelease          # 输出 app/build/outputs/apk/release/app-release.apk
+cp app/build/outputs/apk/release/app-release.apk ../autostudio/app/AutoStudio.apk
+```
+
+正式签名：在 `android/keystore.properties`（不进 git）里写 `storeFile / storePassword / keyAlias / keyPassword`；没有这个文件时用本机调试签名。
 
 ### 项目官网
 

@@ -1,7 +1,7 @@
 // Inline preview for files produced by tools.
-import { post, rawUrl } from "./api.js";
+import { downloadUrl, post, rawUrl } from "./api.js";
 import { basename, h, icon, kindOf, toast } from "./dom.js";
-import { navigate } from "./store.js";
+import { isRemote, navigate } from "./store.js";
 
 export function reveal(path) {
   post("/api/files/reveal", { path }).catch((e) => toast(e.message, "err"));
@@ -24,8 +24,8 @@ export function previewFile(path, { editorMedia, compact = false } = {}) {
     actions.push(h("button", { class: "btn sm primary", html: icon("captions") + "字幕编辑器",
       onclick: () => navigate(subtitleEditorHash(path, editorMedia)) }));
   }
-  actions.push(h("a", { class: "btn sm ghost icon-only", title: "下载", href: rawUrl(path), download: basename(path), html: icon("download") }));
-  actions.push(h("button", { class: "btn sm ghost icon-only", title: "在文件夹中显示", html: icon("folder"), onclick: () => reveal(path) }));
+  actions.push(h("a", { class: "btn sm ghost icon-only", title: isRemote() ? "保存到手机" : "下载", href: downloadUrl(path), download: basename(path), html: icon("download") }));
+  if (!isRemote()) actions.push(h("button", { class: "btn sm ghost icon-only", title: "在文件夹中显示", html: icon("folder"), onclick: () => reveal(path) }));
   const ico = { video: "film", audio: "music", image: "image", subtitle: "captions", text: "text" }[kind] || "file";
   return h("div", { class: `preview ${media ? "" : "compact"} ${compact ? "compact" : ""}` },
     compact ? null : media,

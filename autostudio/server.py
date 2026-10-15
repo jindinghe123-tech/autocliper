@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
+import io
 import json
 import logging
 import mimetypes
@@ -15,19 +18,21 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import social, state
 from .agent.loop import run_agent
 from .agent.runs import RunManager
-from .config import CHATGPT_MODELS, MEMORY_FILE, PROVIDER_PRESETS, VERSION  # noqa: F401
+from .config import CHATGPT_MODELS, DATA_DIR, MEMORY_FILE, PROVIDER_PRESETS, VERSION  # noqa: F401
 from .media import asr, stock
 from .media import ffmpeg as ff
 from .media import subs as sublib
 from .providers import ProviderError, make_provider
 from .providers.catalog import fetch_chatgpt_catalog
 from .providers.chatgpt_auth import chatgpt_auth
+from .remote import (APK_FILE, COOKIE, COOKIE_MAX_AGE, DEVICE_PATHS, PUBLIC_PATHS, PairError, device_label,
+                     firewall_fix, firewall_status, remote)
 from .scheduler import TaskScheduler
 from .tools import CATEGORY_LABELS, REGISTRY
 from .media.tts import EDGE_PERSONAS, TTSError, synthesize
@@ -78,19 +83,48 @@ async def lifespan(app: FastAPI):
     state.scheduler = TaskScheduler()
     state.scheduler.start()
     sync_task = asyncio.create_task(_background_model_sync())
+    await remote.apply(app)
     yield
     sync_task.cancel()
+    await remote.stop()
     state.scheduler.shutdown()
 
 
 app = FastAPI(title="AutoStudio", version=VERSION, lifespan=lifespan)
 
 
+def _bearer(request: Request) -> str:
+    auth = request.headers.get("authorization") or ""
+    return auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+
+
+def _phone_guard(request: Request) -> Response | None:
+    """Requests from the phone listener: only paired devices get past the pairing page."""
+    path = request.url.path
+    if path in PUBLIC_PATHS or path.startswith("/static/"):
+        return None
+    device = remote.authenticate(request.cookies.get(COOKIE) or _bearer(request))
+    if not device:
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "这台设备还没有和电脑配对", "code": "unpaired"}, status_code=401)
+        return RedirectResponse("/pair", status_code=303)
+    if (path == "/api/remote" or path.startswith("/api/remote/")) and path not in DEVICE_PATHS:
+        return JSONResponse({"detail": "手机连接的设置只能在电脑上修改"}, status_code=403)
+    remote.touch(device, request.client.host if request.client else "")
+    request.state.device = device
+    return None
+
+
 @app.middleware("http")
 async def local_guard(request: Request, call_next):
-    host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
-    if not ALLOW_ANY_HOST and host not in LOCAL_HOSTS:
-        return JSONResponse({"detail": "forbidden host"}, status_code=403)
+    if request.scope.get("autostudio_remote"):
+        denied = _phone_guard(request)
+        if denied:
+            return denied
+    else:
+        host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
+        if not ALLOW_ANY_HOST and host not in LOCAL_HOSTS:
+            return JSONResponse({"detail": "forbidden host"}, status_code=403)
     if request.url.path.startswith("/api/"):
         if request.headers.get("sec-fetch-site") == "cross-site":
             return JSONResponse({"detail": "cross-site request blocked"}, status_code=403)
@@ -130,12 +164,14 @@ def _optional(mod: str) -> bool:
 
 
 @app.get("/api/meta")
-async def meta() -> dict[str, Any]:
+async def meta(request: Request) -> dict[str, Any]:
     global _caps
     if _caps is None:
         _caps = await ff.capabilities()
+    device = getattr(request.state, "device", None)
     return {
         "version": VERSION,
+        "remote": {"device": remote.device_view(device), "pc_name": remote.data["pc_name"]} if device else None,
         "os": f"{platform.system()} {platform.release()}",
         "workspace": str(state.settings.workspace),
         "ffmpeg": _caps,
@@ -578,6 +614,170 @@ async def cron_preview(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# phone access (see remote.py)
+
+def _remote_view() -> dict[str, Any]:
+    st = remote.status()
+    return {**st, "pairing": remote.pairing_code() if st["running"] else None}
+
+
+@app.get("/api/remote")
+async def remote_status() -> dict[str, Any]:
+    return _remote_view()
+
+
+@app.put("/api/remote")
+async def remote_update(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    if "pc_name" in body:
+        name = str(body.get("pc_name") or "").strip()[:40]
+        if not name:
+            raise HTTPException(400, "电脑名称不能为空")
+        remote.data["pc_name"] = name
+    if "port" in body:
+        try:
+            port = int(body["port"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "端口必须是数字") from None
+        if not 1024 <= port <= 65535 or port == request.url.port:
+            raise HTTPException(400, "端口要在 1024~65535 之间，并且不能和电脑端界面的端口相同")
+        remote.data["port"] = port
+    if "enabled" in body:
+        remote.data["enabled"] = bool(body["enabled"])
+    remote.save()
+    await remote.apply(app)
+    return _remote_view()
+
+
+@app.post("/api/remote/pairing/refresh")
+async def remote_pairing_refresh() -> dict[str, Any]:
+    remote.pairing_code(refresh=True)
+    return _remote_view()
+
+
+@app.get("/api/remote/qr.svg")
+async def remote_qr(ip: str = "") -> Response:
+    st = remote.status()
+    ips = [a["ip"] for a in st["addresses"]]
+    if not ips:
+        raise HTTPException(404, "这台电脑没有连上局域网")
+    url = f"http://{ip if ip in ips else ips[0]}:{st['port']}/pair#{remote.pairing_code()['code']}"
+    try:
+        import segno
+    except ImportError:
+        raise HTTPException(404, "缺少二维码组件 segno：重新双击 AutoStudio.bat 会自动安装") from None
+    buf = io.BytesIO()
+    segno.make(url, error="m").save(buf, kind="svg", scale=6, border=2, dark="#111318", light="#ffffff")
+    return Response(buf.getvalue(), media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+
+_firewall: dict[str, Any] = {"at": 0.0, "value": None}
+
+
+@app.get("/api/remote/firewall")
+async def remote_firewall(refresh: int = 0) -> dict[str, Any]:
+    """Windows: would the firewall let phones in? (takes ~2 s, so it is cached briefly)"""
+    if refresh or not _firewall["value"] or time.time() - _firewall["at"] > 30:
+        _firewall["value"] = await asyncio.to_thread(firewall_status)
+        _firewall["at"] = time.time()
+    return _firewall["value"]
+
+
+@app.post("/api/remote/firewall/fix")
+async def remote_firewall_fix() -> dict[str, Any]:
+    try:
+        await asyncio.to_thread(firewall_fix, remote.port)
+    except Exception as e:  # noqa: BLE001 — usually: the UAC prompt was declined
+        raise HTTPException(400, f"没有完成（是不是在弹出的管理员确认里点了「否」？）{str(e)[:120]}") from e
+    return await remote_firewall(refresh=1)
+
+
+@app.delete("/api/remote/devices/{did}")
+async def remote_revoke(did: str) -> dict[str, Any]:
+    if not remote.revoke(did):
+        raise HTTPException(404, "设备不存在")
+    return _remote_view()
+
+
+@app.patch("/api/remote/devices/{did}")
+async def remote_rename(did: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    name = str(body.get("name") or "").strip()
+    if not name or not remote.rename(did, name):
+        raise HTTPException(400, "名称不能为空")
+    return _remote_view()
+
+
+@app.get("/api/remote/hello")
+async def remote_hello() -> dict[str, Any]:
+    """Public: lets the phone app recognise this PC on the network before it is paired."""
+    return {"app": "AutoStudio", "version": VERSION, "pc_id": remote.data["pc_id"], "pc_name": remote.data["pc_name"],
+            "pairing": remote.pairing_open(), "apk": APK_FILE.is_file()}
+
+
+@app.post("/api/remote/pair")
+async def remote_pair(request: Request, body: dict[str, Any] = Body(...)) -> JSONResponse:
+    if not request.scope.get("autostudio_remote"):
+        raise HTTPException(400, "请在手机上配对")
+    await asyncio.sleep(0.4)     # makes guessing codes slow
+    ip = request.client.host if request.client else ""
+    try:
+        dev, token = remote.pair(str(body.get("code") or ""), str(body.get("name") or "").strip()
+                                 or device_label(request.headers.get("user-agent") or ""),
+                                 str(body.get("platform") or "web"), ip)
+    except PairError as e:
+        raise HTTPException(400, str(e)) from e
+    st = remote.status()
+    resp = JSONResponse({"token": token, "device": remote.device_view(dev), "pc_id": st["pc_id"],
+                         "pc_name": st["pc_name"], "addresses": st["addresses"], "port": st["port"]})
+    resp.set_cookie(COOKIE, token, max_age=COOKIE_MAX_AGE, httponly=True, samesite="strict", path="/")
+    return resp
+
+
+@app.get("/api/remote/whoami")
+async def remote_whoami(request: Request) -> dict[str, Any]:
+    device = getattr(request.state, "device", None)
+    st = remote.status()
+    return {"pc_id": st["pc_id"], "pc_name": st["pc_name"], "port": st["port"], "addresses": st["addresses"],
+            "device": remote.device_view(device) if device else None}
+
+
+@app.post("/api/remote/logout")
+async def remote_logout(request: Request) -> JSONResponse:
+    device = getattr(request.state, "device", None)
+    if device:
+        remote.revoke(device["id"])
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE, path="/")
+    return resp
+
+
+@app.get("/pair", response_class=HTMLResponse)
+async def pair_page() -> HTMLResponse:
+    return HTMLResponse((WEB_DIR / "pair.html").read_text("utf-8"), headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/download/AutoStudio.apk")
+async def download_apk() -> FileResponse:
+    if not APK_FILE.is_file():
+        raise HTTPException(404, "这个版本没有附带安卓 App")
+    return FileResponse(APK_FILE, media_type="application/vnd.android.package-archive", filename="AutoStudio.apk")
+
+
+@app.get("/manifest.webmanifest")
+async def manifest() -> JSONResponse:
+    return JSONResponse({
+        "name": "AutoStudio", "short_name": "AutoStudio", "start_url": "/", "display": "standalone",
+        "background_color": "#0d0e12", "theme_color": "#0d0e12", "lang": "zh-CN",
+        "icons": [{"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                  {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png"}]},
+        media_type="application/manifest+json")
+
+
+@app.get("/favicon.ico")
+async def favicon() -> FileResponse:
+    return FileResponse(WEB_DIR / "favicon.svg", media_type="image/svg+xml")
+
+
+# ---------------------------------------------------------------------------
 # files
 
 def _kind(p: Path) -> str:
@@ -629,14 +829,106 @@ async def list_files(path: str = "") -> dict[str, Any]:
 
 
 @app.get("/api/files/raw")
-async def raw_file(path: str) -> FileResponse:
+async def raw_file(path: str, download: int = 0, name: str = "") -> FileResponse:
     p = _resolve(path)
     if not p.is_file():
         raise HTTPException(404, "文件不存在")
     mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
     if p.suffix.lower() in (".srt", ".ass", ".vtt", ".md", ".txt", ".log", ".json", ".csv"):
         mime = "text/plain; charset=utf-8"
-    return FileResponse(p, media_type=mime, headers={"Cache-Control": "no-cache"})
+    # `name`: a friendlier file name for downloads (every delivered cut is called 成片.mp4)
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", name).strip(" .")[:120]
+    if name and not name.lower().endswith(p.suffix.lower()):
+        name += p.suffix
+    return FileResponse(p, media_type=mime, headers={"Cache-Control": "no-cache"},
+                        filename=(name or p.name) if download else None)
+
+
+THUMB_DIR = DATA_DIR / "cache" / "thumbs"
+
+
+@app.get("/api/thumb")
+async def thumb(path: str, w: int = 360) -> FileResponse:
+    """A small JPEG poster for a video or image, cached by path + mtime."""
+    p = _resolve(path)
+    if not p.is_file():
+        raise HTTPException(404, "文件不存在")
+    w = max(64, min(1280, w))
+    st = p.stat()
+    out = THUMB_DIR / (hashlib.sha1(f"{p}|{st.st_mtime_ns}|{st.st_size}|{w}".encode()).hexdigest() + ".jpg")
+    if not out.exists():
+        THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(".part.jpg")
+        kind = _kind(p)
+        if kind not in ("image", "video"):
+            raise HTTPException(415, "这种文件没有缩略图")
+        try:
+            if kind == "image":
+                def make() -> None:
+                    from PIL import Image, ImageOps
+
+                    with Image.open(p) as im:
+                        im = ImageOps.exif_transpose(im).convert("RGB")
+                        im.thumbnail((w, w * 2))
+                        im.save(tmp, "JPEG", quality=82)
+                await asyncio.to_thread(make)
+            else:
+                for at in ("1", "0"):     # clips shorter than a second have no frame at 1 s
+                    with contextlib.suppress(ff.FFmpegError):
+                        await ff.ffmpeg(["-ss", at, "-i", str(p), "-frames:v", "1", "-vf", f"scale={w}:-2",
+                                         "-q:v", "5", str(tmp)], timeout=30)
+                    if tmp.exists() and tmp.stat().st_size:
+                        break
+            tmp.replace(out)
+        except Exception as e:  # noqa: BLE001
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(500, f"生成缩略图失败：{e}") from e
+    return FileResponse(out, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+# Folders that hold inputs rather than results stay out of 作品.
+WORKS_SKIP_TOP = {"uploads", "assets"}
+
+
+def _works_scan(ws: Path, limit: int) -> dict[str, Any]:
+    delivered: list[dict[str, Any]] = []
+    videos: list[dict[str, Any]] = []
+    for root, dirs, files in os.walk(ws):
+        rp = Path(root)
+        top = rp == ws
+        dirs[:] = [d for d in dirs if not d.startswith(".") and not (top and d in WORKS_SKIP_TOP)]
+        for f in files:
+            fp = rp / f
+            if fp.suffix.lower() not in ff.VIDEO_EXTS:
+                continue
+            try:
+                st = fp.stat()
+            except OSError:
+                continue
+            item = {"path": str(fp), "name": f, "rel": fp.relative_to(ws).as_posix(), "folder": "" if top else rp.name,
+                    "size": st.st_size, "mtime": st.st_mtime}
+            videos.append(item)
+            if f == "成片.mp4":
+                cover, copy = rp / "封面.jpg", rp / "发布文案.md"
+                title, desc = rp.name.removesuffix("_交付"), ""
+                if copy.is_file():
+                    with contextlib.suppress(OSError):
+                        lines = copy.read_text("utf-8").splitlines()
+                        if lines and lines[0].startswith("# "):
+                            title = lines[0][2:].strip() or title
+                        desc = "\n".join(lines[1:]).strip()
+                delivered.append({**item, "title": title, "description": desc[:2000],
+                                  "cover": str(cover) if cover.is_file() else None,
+                                  "copy": str(copy) if copy.is_file() else None})
+    videos.sort(key=lambda x: -x["mtime"])
+    delivered.sort(key=lambda x: -x["mtime"])
+    return {"delivered": delivered, "videos": videos[:limit], "total": len(videos), "workspace": str(ws)}
+
+
+@app.get("/api/works")
+async def works(limit: int = 300) -> dict[str, Any]:
+    """Finished videos: delivered cuts (成片 + 封面 + 发布文案) and every other video in the workspace."""
+    return await asyncio.to_thread(_works_scan, state.settings.workspace.resolve(), max(1, min(2000, limit)))
 
 
 @app.post("/api/upload")
