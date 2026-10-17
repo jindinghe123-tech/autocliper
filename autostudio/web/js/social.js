@@ -199,9 +199,11 @@ export async function showPublish(main) {
   async function addXhs(accountId) {
     let job;
     try { job = await post("/api/social/xiaohongshu/login", { account_id: accountId || null }); } catch (e) { return toast(e.message, "err"); }
+    const step = h("div", { class: "small muted" });
     const status = h("div", { class: "notice" }, h("div", { class: "spinner" }), h("div", {},
       h("b", {}, "已在你的电脑上打开一个浏览器窗口"),
-      h("div", { class: "small muted" }, "请在窗口里用小红书 App 扫码（或手机验证码）登录「小红书创作服务平台」。登录成功后窗口会自动关闭。")));
+      h("div", { class: "small muted" }, "请在窗口里用手机验证码（或点右上角二维码图标，用小红书 App 扫码）登录「小红书创作服务平台」。登录成功后窗口会自动关闭。"),
+      step));
     const m = modal({
       title: accountId ? "重新登录小红书" : "添加小红书账号",
       body: h("div", {}, status, h("div", { class: "hint", style: { marginTop: "10px" } },
@@ -211,7 +213,8 @@ export async function showPublish(main) {
     });
     const poll = setInterval(async () => {
       const j = await get(`/api/social/jobs/${job.id}`).catch(() => null);
-      if (!j || j.status === "running") return;
+      if (!j) return;
+      if (j.status === "running") { step.textContent = j.text || ""; return; }
       clearInterval(poll);
       if (j.status === "done") { m.close(); toast(j.note || "小红书账号已添加", "ok"); loadAccounts(); return; }
       status.className = "notice err";

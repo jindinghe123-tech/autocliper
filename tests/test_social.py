@@ -136,3 +136,67 @@ def test_task_auto_publish_column():
     state.db.update_task(t["id"], auto_publish=False)
     assert state.db.get_task(t["id"])["auto_publish"] == 0
     state.db.delete_task(t["id"])
+
+
+# ---------------------------------------------------------------------------
+# 小红书 login: the real polling loop in a headless browser, against a stand-in creator site
+
+LOGIN_PAGE = """<html><body>短信登录<script>
+  setTimeout(() => fetch('/__signed_in').then(() => { %s }), 1500);
+</script></body></html>"""
+
+
+@pytest.fixture()
+def fake_creator(monkeypatch: pytest.MonkeyPatch):
+    from autostudio.social import browser, xiaohongshu as xhs
+
+    site = {"signed": False, "after": ""}
+    real_launch = browser.launch
+
+    def handle(route) -> None:
+        path = route.request.url.split("xiaohongshu.com", 1)[1].split("?")[0]
+        if path == "/__signed_in":
+            site["signed"] = True
+            return route.fulfill(body="ok")
+        if path == "/api/galaxy/user/info":
+            if site["signed"]:
+                return route.fulfill(json={"data": {"userName": "测试号", "userId": "u1", "redId": "42"}})
+            return route.fulfill(status=401, json={"code": -1, "msg": "登录已过期"})
+        if path.startswith("/login"):
+            return route.fulfill(content_type="text/html", body=LOGIN_PAGE % site["after"])
+        if not site["signed"]:
+            return route.fulfill(status=302, headers={"location": xhs.LOGIN_URL + "?redirectReason=401"})
+        return route.fulfill(content_type="text/html", body="<html><body>首页</body></html>")
+
+    def launch(p, profile_dir, headless):
+        try:
+            ctx = real_launch(p, profile_dir, True)
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(f"no browser to drive: {e}")
+        ctx.route("https://creator.xiaohongshu.com/**", handle)
+        return ctx
+
+    monkeypatch.setattr(browser, "launch", launch)
+    return site
+
+
+@pytest.mark.parametrize("after", ["location.href = '/new/home'", ""], ids=["site-navigates", "url-stays-on-login"])
+def test_xhs_login_is_detected(fake_creator, tmp_path: Path, after: str) -> None:
+    pytest.importorskip("playwright.sync_api")
+    from autostudio.social import xiaohongshu as xhs
+
+    fake_creator["after"] = after
+    steps: list[str] = []
+    prof = xhs.login(tmp_path / "profile", timeout=40, progress=lambda f, t: steps.append(t))
+    assert prof["nickname"] == "测试号" and prof["user_id"] == "u1"
+    assert any("已登录" in s for s in steps)
+
+
+def test_xhs_login_notices_the_window_going_away(fake_creator, tmp_path: Path) -> None:
+    pytest.importorskip("playwright.sync_api")
+    from autostudio.social import xiaohongshu as xhs
+
+    fake_creator["after"] = "location.href = 'about:blank'"
+    fake_creator["signed"] = False
+    with pytest.raises(xhs.LoginCancelled, match="窗口已关闭"):     # not 登录超时
+        xhs.login(tmp_path / "profile", timeout=40)

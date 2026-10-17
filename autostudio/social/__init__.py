@@ -285,7 +285,7 @@ def start_xhs_login(account_id: str | None = None) -> dict[str, Any]:
     async def run() -> None:
         try:
             async with _lock(aid):
-                prof = await asyncio.to_thread(xhs.login, profile_dir(aid))
+                prof = await asyncio.to_thread(xhs.login, profile_dir(aid), progress=lambda f, t: job.update(progress=f, text=t))
             profile = {k: v for k, v in prof.items() if v}
             twin = next((a for a in state.db.list_accounts("xiaohongshu") if a["id"] != aid and profile.get("user_id")
                          and (a["profile"] or {}).get("user_id") == profile["user_id"]), None)

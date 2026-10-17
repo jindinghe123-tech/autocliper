@@ -61,6 +61,25 @@ def _text(page: Any) -> str:
         return ""
 
 
+def _pump(ctx: Any, ms: int) -> None:
+    """Wait while Playwright keeps processing browser events.
+
+    Never time.sleep in a polling loop: the sync API only reads events while one of its own calls runs, so
+    page.url and ctx.pages stay frozen (a finished login looks like it is still on /login, forever).
+    """
+    for p in ctx.pages:
+        if not p.is_closed():
+            try:
+                p.wait_for_timeout(ms)
+                return
+            except Exception:  # noqa: BLE001 - closed while waiting; try another page
+                pass
+    try:
+        ctx.wait_for_event("page", timeout=ms)
+    except Exception:  # noqa: BLE001 - timeout (no new page) or the browser is gone
+        time.sleep(ms / 1000)
+
+
 def _visible(page: Any, selector: str) -> Any | None:
     loc = page.locator(selector).filter(visible=True)
     return loc.first if loc.count() else None
@@ -89,17 +108,38 @@ def _profile(page: Any) -> dict[str, Any]:
         return {}
 
 
+SESSION_JS = r"""async () => {
+  try {
+    const r = await fetch('/api/galaxy/user/info', { credentials: 'include' });
+    return r.ok && !!((await r.json()).data || {}).userName;
+  } catch (e) { return false; }
+}"""
+
+
+def _signed_in(page: Any) -> bool:
+    """Ask the creator site itself (works whatever page the login flow leaves the user on)."""
+    try:
+        return bool(page.evaluate(SESSION_JS))
+    except Exception:  # noqa: BLE001 - navigating; ask again next round
+        return False
+
+
 # ---------------------------------------------------------------------------
 # login
 
-def login(profile_dir: Path, timeout: float = 600) -> dict[str, Any]:
+def login(profile_dir: Path, timeout: float = 600, progress: Progress | None = None) -> dict[str, Any]:
     """Open a visible window on the login page and wait until the user has signed in (or closes it)."""
+    say = progress or (lambda _f, _t: None)
 
     def go(ctx: Any, page: Any) -> dict[str, Any]:
         page.goto(LOGIN_URL)
+        say(0.1, "等待你在电脑上的浏览器窗口里登录…")
         deadline = time.time() + timeout
         gone_since = 0.0
+        next_ask = time.time() + 3
+        hold = 0.0
         while time.time() < deadline:
+            _pump(ctx, 1000)
             # Edge may keep extra hidden pages (and keep running after the window is closed), so look at
             # every page and treat "no 小红书 page left" as the user closing the window.
             pages = [p for p in ctx.pages if not p.is_closed() and "xiaohongshu.com" in p.url]
@@ -107,20 +147,27 @@ def login(profile_dir: Path, timeout: float = 600) -> dict[str, Any]:
                 gone_since = gone_since or time.time()
                 if time.time() - gone_since > 4:
                     raise LoginCancelled("登录窗口已关闭")
-                time.sleep(1)
                 continue
             gone_since = 0.0
-            for page in pages:
-                try:
-                    if _logged_in(page.url) and "creator.xiaohongshu.com" in page.url:
-                        page.goto(HOME_URL)
-                        _settle(page)
-                        if _logged_in(page.url):
-                            return _profile(page)
-                except Exception as e:  # noqa: BLE001 - window closed mid-navigation
-                    if "closed" in str(e).lower():
-                        raise LoginCancelled("登录窗口已关闭") from e
-            time.sleep(1)
+            if time.time() < hold:
+                continue
+            creator = [p for p in pages if "creator.xiaohongshu.com" in p.url]
+            done = next((p for p in creator if _logged_in(p.url)), None)
+            if done is None and creator and time.time() >= next_ask:
+                next_ask = time.time() + 3
+                done = next((p for p in creator if _signed_in(p)), None)
+            if done is None:
+                continue
+            say(0.8, "已登录，正在读取账号信息…")
+            try:
+                done.goto(HOME_URL)
+                _settle(done)
+                if _logged_in(done.url):
+                    return _profile(done)
+                hold = time.time() + 10     # the site disagrees after all: don't keep pulling the page away
+            except Exception as e:  # noqa: BLE001 - window closed mid-navigation
+                if "closed" in str(e).lower():
+                    raise LoginCancelled("登录窗口已关闭") from e
         raise LoginCancelled("登录超时（10 分钟）")
 
     try:
@@ -160,7 +207,7 @@ def _wait_human(page: Any, headless: bool, progress: Progress) -> None:
     progress(0.05, "小红书要求安全验证，请在弹出的浏览器窗口里完成…")
     deadline = time.time() + 300
     while time.time() < deadline and _security_check(page):
-        time.sleep(2)
+        page.wait_for_timeout(2000)
     if _security_check(page):
         raise RuntimeError("安全验证超时未完成")
 
@@ -214,7 +261,7 @@ def _wait_upload(page: Any, video: bool, size_mb: float, headless: bool, progres
                 return
         else:
             quiet = 0
-        time.sleep(1.5)
+        page.wait_for_timeout(1500)
     raise RuntimeError("上传超时")
 
 
@@ -420,7 +467,7 @@ def _wait_published(page: Any, headless: bool, progress: Progress, before: set[s
             msg = "；".join(msgs[:3])
             hint = next((h for k, h in HINTS if k in msg), "")
             raise RuntimeError(f"小红书没有发布，页面提示：{msg}" + (f"。{hint}" if hint else ""))
-        time.sleep(0.5)
+        page.wait_for_timeout(500)
     raise RuntimeError("点击发布后 90 秒内没有看到「发布成功」")
 
 
