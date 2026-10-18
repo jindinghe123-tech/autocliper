@@ -59,6 +59,7 @@ def account_view(a: dict[str, Any]) -> dict[str, Any]:
     p = a.get("profile") or {}
     return {"id": a["id"], "platform": a["platform"], "platform_label": PLATFORMS.get(a["platform"], {}).get("label", a["platform"]),
             "name": a["name"], "status": a["status"], "handle": p.get("handle") or p.get("red_id") or "",
+            "overseas": "rednote.com" in (p.get("site") or ""),
             "avatar": p.get("avatar") or "", "created_at": a["created_at"], "updated_at": a["updated_at"]}
 
 
@@ -237,8 +238,12 @@ async def _run_xhs(acc: dict[str, Any], content: dict[str, Any], progress: Progr
 
     if headless is None:
         headless = not (state.settings.get().get("social") or {}).get("xhs_show_browser", True)
-    return await asyncio.to_thread(xhs.publish, profile_dir(acc["id"]), content, headless=headless, progress=cb,
-                                   debug_dir=DEBUG_DIR, dry_run=dry_run)
+    profile = acc.get("profile") or {}
+    res = await asyncio.to_thread(xhs.publish, profile_dir(acc["id"]), content, headless=headless, progress=cb,
+                                  debug_dir=DEBUG_DIR, dry_run=dry_run, site=profile.get("site"))
+    if res.get("site") and res["site"] != profile.get("site"):     # the platform moved the account: remember
+        state.db.update_account(acc["id"], profile={**profile, "site": res["site"]})
+    return res
 
 
 async def publish_post(post_id: str, progress: Progress = _noop, announce: bool = False) -> dict[str, Any]:
@@ -442,7 +447,7 @@ async def check_account(aid: str) -> dict[str, Any]:
                 profile = {**acc["profile"], "handle": info["handle"], "avatar": info["avatar"], "title": info["title"]}
                 acc = state.db.update_account(aid, status="ok", profile=profile) or acc
             else:
-                prof = await asyncio.to_thread(xhs.check, profile_dir(aid))
+                prof = await asyncio.to_thread(xhs.check, profile_dir(aid), (acc["profile"] or {}).get("site"))
                 if prof is None:
                     acc = state.db.update_account(aid, status="expired") or acc
                 else:

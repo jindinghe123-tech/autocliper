@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 os.environ.setdefault("AUTOSTUDIO_HOME", tempfile.mkdtemp(prefix="autostudio_test_"))
 
@@ -141,6 +142,7 @@ def test_task_auto_publish_column():
 # ---------------------------------------------------------------------------
 # 小红书 login: the real polling loop in a headless browser, against a stand-in creator site
 
+REDNOTE = "https://creator.rednote.com"
 LOGIN_PAGE = """<html><body>短信登录<script>
   setTimeout(() => fetch('/__signed_in').then(() => { %s }), 1500);
 </script></body></html>"""
@@ -150,23 +152,32 @@ LOGIN_PAGE = """<html><body>短信登录<script>
 def fake_creator(monkeypatch: pytest.MonkeyPatch):
     from autostudio.social import browser, xiaohongshu as xhs
 
-    site = {"signed": False, "after": ""}
+    # overseas: the account was registered abroad, so once signed in the platform moves it to creator.rednote.com
+    # (where its session lives) and that page reloads itself once
+    site = {"signed": False, "after": "", "overseas": False}
     real_launch = browser.launch
 
     def handle(route) -> None:
-        path = route.request.url.split("xiaohongshu.com", 1)[1].split("?")[0]
-        if path == "/__signed_in":
+        u = urlparse(route.request.url)
+        here = f"{u.scheme}://{u.netloc}"
+        home = REDNOTE if site["overseas"] else xhs.CREATOR
+        if u.path == "/__signed_in":
             site["signed"] = True
             return route.fulfill(body="ok")
-        if path == "/api/galaxy/user/info":
+        if u.path.startswith("/login"):
+            return route.fulfill(content_type="text/html", body=LOGIN_PAGE % site["after"])
+        if site["signed"] and here != home:
+            if u.path.startswith("/api/"):
+                return route.fulfill(status=401, json={"code": -1, "msg": "登录已过期"})
+            return route.fulfill(status=302, headers={"location": home + u.path + (f"?{u.query}" if u.query else "")})
+        if u.path == "/api/galaxy/user/info":
             if site["signed"]:
                 return route.fulfill(json={"data": {"userName": "测试号", "userId": "u1", "redId": "42"}})
             return route.fulfill(status=401, json={"code": -1, "msg": "登录已过期"})
-        if path.startswith("/login"):
-            return route.fulfill(content_type="text/html", body=LOGIN_PAGE % site["after"])
         if not site["signed"]:
-            return route.fulfill(status=302, headers={"location": xhs.LOGIN_URL + "?redirectReason=401"})
-        return route.fulfill(content_type="text/html", body="<html><body>首页</body></html>")
+            return route.fulfill(status=302, headers={"location": here + "/login?redirectReason=401"})
+        reload_once = "<script>if(!sessionStorage.r){sessionStorage.r=1;setTimeout(()=>location.reload(),300)}</script>"
+        return route.fulfill(content_type="text/html", body=f"<html><body>首页{reload_once}</body></html>")
 
     def launch(p, profile_dir, headless):
         try:
@@ -174,6 +185,7 @@ def fake_creator(monkeypatch: pytest.MonkeyPatch):
         except Exception as e:  # noqa: BLE001
             pytest.skip(f"no browser to drive: {e}")
         ctx.route("https://creator.xiaohongshu.com/**", handle)
+        ctx.route(f"{REDNOTE}/**", handle)
         return ctx
 
     monkeypatch.setattr(browser, "launch", launch)
@@ -189,7 +201,22 @@ def test_xhs_login_is_detected(fake_creator, tmp_path: Path, after: str) -> None
     steps: list[str] = []
     prof = xhs.login(tmp_path / "profile", timeout=40, progress=lambda f, t: steps.append(t))
     assert prof["nickname"] == "测试号" and prof["user_id"] == "u1"
+    assert prof["site"] == "https://creator.xiaohongshu.com"
     assert any("已登录" in s for s in steps)
+
+
+def test_xhs_overseas_account_follows_to_rednote(fake_creator, tmp_path: Path) -> None:
+    pytest.importorskip("playwright.sync_api")
+    from autostudio.social import browser, xiaohongshu as xhs
+
+    fake_creator.update(overseas=True, after="location.href = '/new/home'")
+    prof = xhs.login(tmp_path / "profile", timeout=40)
+    assert prof["nickname"] == "测试号" and prof["site"] == REDNOTE        # not "登录窗口已关闭"
+    assert xhs.check(tmp_path / "p2")["site"] == REDNOTE                   # an account saved before this knew no site
+    assert xhs.check(tmp_path / "p2", REDNOTE)["site"] == REDNOTE
+    landed = browser.run(lambda _ctx, page: xhs._open(page, xhs.CREATOR, xhs.PUBLISH_PATH.format(target="video")),
+                         tmp_path / "p3", headless=True)
+    assert landed == REDNOTE
 
 
 def test_xhs_login_notices_the_window_going_away(fake_creator, tmp_path: Path) -> None:

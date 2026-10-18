@@ -16,10 +16,15 @@ from urllib.parse import urlparse
 from . import browser
 
 CREATOR = "https://creator.xiaohongshu.com"
+# Accounts registered abroad live on the same platform under the RedNote domain: after signing in at CREATOR
+# they are sent to creator.rednote.com. Each account remembers its site ("site" in its profile).
+DOMAINS = ("xiaohongshu.com", "rednote.com")
 LOGIN_URL = f"{CREATOR}/login"
-HOME_URL = f"{CREATOR}/new/home"
-PUBLISH_URL = f"{CREATOR}/publish/publish?from=menu&target={{target}}"
-NOTES_URL = f"{CREATOR}/new/note-manager"
+HOME_PATH = "/new/home"
+HOME_URL = f"{CREATOR}{HOME_PATH}"
+PUBLISH_PATH = "/publish/publish?from=menu&target={target}"
+NOTES_PATH = "/new/note-manager"
+NOTES_URL = f"{CREATOR}{NOTES_PATH}"
 TITLE_MAX = 20
 DESC_MAX = 1000
 IMAGES_MAX = 18
@@ -41,9 +46,22 @@ class PublishFailed(RuntimeError):
         self.screenshot = screenshot
 
 
-def _logged_in(url: str) -> bool:
+def _ours(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return any(host == d or host.endswith("." + d) for d in DOMAINS)
+
+
+def _creator(url: str) -> bool:
+    return _ours(url) and (urlparse(url).hostname or "").startswith("creator.")
+
+
+def _site(url: str) -> str:
     u = urlparse(url)
-    return u.netloc.endswith("xiaohongshu.com") and not u.path.startswith("/login")
+    return f"{u.scheme}://{u.netloc}"
+
+
+def _logged_in(url: str) -> bool:
+    return _ours(url) and not urlparse(url).path.startswith("/login")
 
 
 def _settle(page: Any, idle_ms: int = 6000) -> None:
@@ -141,8 +159,8 @@ def login(profile_dir: Path, timeout: float = 600, progress: Progress | None = N
         while time.time() < deadline:
             _pump(ctx, 1000)
             # Edge may keep extra hidden pages (and keep running after the window is closed), so look at
-            # every page and treat "no 小红书 page left" as the user closing the window.
-            pages = [p for p in ctx.pages if not p.is_closed() and "xiaohongshu.com" in p.url]
+            # every page and treat "no 小红书 / RedNote page left" as the user closing the window.
+            pages = [p for p in ctx.pages if not p.is_closed() and _ours(p.url)]
             if not pages:
                 gone_since = gone_since or time.time()
                 if time.time() - gone_since > 4:
@@ -151,7 +169,7 @@ def login(profile_dir: Path, timeout: float = 600, progress: Progress | None = N
             gone_since = 0.0
             if time.time() < hold:
                 continue
-            creator = [p for p in pages if "creator.xiaohongshu.com" in p.url]
+            creator = [p for p in pages if _creator(p.url)]
             done = next((p for p in creator if _logged_in(p.url)), None)
             if done is None and creator and time.time() >= next_ask:
                 next_ask = time.time() + 3
@@ -160,10 +178,10 @@ def login(profile_dir: Path, timeout: float = 600, progress: Progress | None = N
                 continue
             say(0.8, "已登录，正在读取账号信息…")
             try:
-                done.goto(HOME_URL)
+                done.goto(_site(done.url) + HOME_PATH)     # an overseas account may be sent on to RedNote again
                 _settle(done)
-                if _logged_in(done.url):
-                    return _profile(done)
+                if _logged_in(done.url) and _creator(done.url):
+                    return {**_profile(done), "site": _site(done.url)}
                 hold = time.time() + 10     # the site disagrees after all: don't keep pulling the page away
             except Exception as e:  # noqa: BLE001 - window closed mid-navigation
                 if "closed" in str(e).lower():
@@ -180,13 +198,13 @@ def login(profile_dir: Path, timeout: float = 600, progress: Progress | None = N
         raise
 
 
-def check(profile_dir: Path) -> dict[str, Any] | None:
-    """Profile info if this browser profile is still signed in, else None."""
+def check(profile_dir: Path, site: str | None = None) -> dict[str, Any] | None:
+    """Profile info (with the site the account lives on) if this browser profile is still signed in, else None."""
 
     def go(_ctx: Any, page: Any) -> dict[str, Any] | None:
-        page.goto(HOME_URL)
+        page.goto((site or CREATOR) + HOME_PATH)
         _settle(page)
-        return _profile(page) if _logged_in(page.url) else None
+        return {**_profile(page), "site": _site(page.url)} if _logged_in(page.url) else None
 
     return browser.run(go, profile_dir, headless=True)
 
@@ -481,8 +499,19 @@ def _shot(page: Any, debug_dir: Path, tag: str) -> str:
         return ""
 
 
+def _open(page: Any, site: str, path: str) -> str:
+    """Open a creator page on the account's site; follow the platform if it sends the account elsewhere."""
+    page.goto(site + path)
+    _settle(page)
+    landed = _site(page.url)
+    if _logged_in(page.url) and _creator(page.url) and landed != site and not urlparse(page.url).path.startswith(path.split("?")[0]):
+        page.goto(landed + path)
+        _settle(page)
+    return _site(page.url)
+
+
 def publish(profile_dir: Path, post: dict[str, Any], *, headless: bool, progress: Progress, debug_dir: Path,
-            dry_run: bool = False) -> dict[str, Any]:
+            dry_run: bool = False, site: str | None = None) -> dict[str, Any]:
     video = post.get("video")
     images = post.get("images") or []
     files = [video] if video else images
@@ -491,8 +520,7 @@ def publish(profile_dir: Path, post: dict[str, Any], *, headless: bool, progress
 
     def go(_ctx: Any, page: Any) -> dict[str, Any]:
         progress(0.02, "打开小红书创作中心…")
-        page.goto(PUBLISH_URL.format(target="video" if video else "image"))
-        _settle(page)
+        here = _open(page, site or CREATOR, PUBLISH_PATH.format(target="video" if video else "image"))
         if not _logged_in(page.url):
             raise NeedLogin("小红书登录已失效，请在 发布 页重新登录这个账号")
         try:
@@ -511,13 +539,13 @@ def publish(profile_dir: Path, post: dict[str, Any], *, headless: bool, progress
                 if w:
                     warnings.append(w)
             if dry_run:
-                return {"dry_run": True, "screenshot": _shot(page, debug_dir, "dryrun"), "warnings": warnings}
+                return {"dry_run": True, "screenshot": _shot(page, debug_dir, "dryrun"), "warnings": warnings, "site": here}
             progress(0.88, "点击发布…")
             _dismiss_tips(page)
             before = _lines(page)
             _click_publish(page)
             _wait_published(page, headless, progress, before)
-            return {"url": NOTES_URL, "warnings": warnings}
+            return {"url": here + NOTES_PATH, "warnings": warnings, "site": here}
         except NeedLogin:
             raise
         except Exception as e:  # noqa: BLE001
