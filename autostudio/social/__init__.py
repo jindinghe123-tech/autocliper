@@ -75,6 +75,56 @@ def list_posts(status: str | None = None, limit: int = 100) -> list[dict[str, An
 
 
 # ---------------------------------------------------------------------------
+# phone notifications (remote.Notices): "approve these" and how a publish went
+
+def _phone(ev: dict[str, Any]) -> None:
+    from .. import remote
+    try:
+        remote.remote.notices.publish(ev)
+    except Exception:  # noqa: BLE001 - a notification must never break publishing
+        log.warning("phone notice failed", exc_info=True)
+
+
+def _label(p: dict[str, Any]) -> str:
+    acc = state.db.get_account(p["account_id"])
+    return f"{PLATFORMS.get(p['platform'], {}).get('label', p['platform'])}「{acc['name'] if acc else '?'}」"
+
+
+def _review_route(ids: list[str]) -> str:
+    return "#/review/" + ",".join(ids)
+
+
+def pending_notice(session_id: str, pending: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a notification about posts waiting for approval says, and where tapping it goes."""
+    text = "；".join(f"「{p['content'].get('title') or '无标题'}」→ {_label(p)}" for p in pending[:3])
+    if len(pending) > 3:
+        text += f" 等 {len(pending)} 条"
+    return {"route": _review_route([p["id"] for p in pending]), "pending": len(pending),
+            "posts": [{"id": p["id"], "title": p["content"].get("title") or ""} for p in pending],
+            "text": text + "。点开预览，一键批准发布"}
+
+
+def announce_pending(session_id: str) -> None:
+    """An unattended run just queued posts: ask the user to approve them."""
+    pending = state.db.list_posts("pending", 20, session_id=session_id)
+    if not pending:
+        return
+    sess = state.db.get_session(session_id) or {}
+    _phone({"type": "posts_pending", "session_id": session_id, "title": sess.get("title") or "定时任务",
+            "task": sess.get("kind") == "task", **pending_notice(session_id, pending)})
+
+
+def _announce_result(post: dict[str, Any], kind: str, text: str) -> None:
+    sid = post.get("session_id") or ""
+    waiting = [p for p in state.db.list_posts("pending", 20, session_id=sid) if p["id"] != post["id"]] if sid else []
+    if waiting:
+        text += f"。还有 {len(waiting)} 条等你确认"
+    _phone({"type": kind, "session_id": sid, "post_id": post["id"], "title": post["content"].get("title") or "无标题",
+            "text": text, "url": post.get("url") or "", "pending": len(waiting),
+            "route": _review_route([post["id"], *[p["id"] for p in waiting]])})
+
+
+# ---------------------------------------------------------------------------
 # resolving targets & validating content
 
 def resolve_accounts(specs: list[str]) -> list[dict[str, Any]]:
@@ -191,17 +241,40 @@ async def _run_xhs(acc: dict[str, Any], content: dict[str, Any], progress: Progr
                                    debug_dir=DEBUG_DIR, dry_run=dry_run)
 
 
-async def publish_post(post_id: str, progress: Progress = _noop) -> dict[str, Any]:
-    """Publish one stored post now; never raises — the outcome is written to the post."""
+async def publish_post(post_id: str, progress: Progress = _noop, announce: bool = False) -> dict[str, Any]:
+    """Publish one stored post now; never raises — the outcome is written to the post.
+
+    `announce`: tell paired phones how it went (for publishes the user started and walked away from).
+    """
     post = state.db.get_post(post_id)
     if not post:
         raise ValueError("发布记录不存在")
+    try:
+        done = await _publish(post, progress, announce)
+    finally:
+        PROGRESS.pop(post_id, None)     # never leave a phone waiting on a publish that is over
+    if announce:
+        label = _label(done)
+        if done["status"] == "published":
+            _announce_result(done, "post_published", f"已发到{label}")
+        else:
+            _announce_result(done, "post_failed", f"{label}：{done.get('error') or '发布失败'}")
+    return done
+
+
+async def _publish(post: dict[str, Any], progress: Progress, announce: bool) -> dict[str, Any]:
+    post_id = post["id"]
     acc = state.db.get_account(post["account_id"])
     if not acc:
         return state.db.update_post(post_id, status="failed", error="账号已被删除") or post
+    asked = False
 
     async def prog(f: float, t: str) -> None:
+        nonlocal asked
         PROGRESS[post_id] = {"progress": round(f, 3), "text": t}
+        if announce and not asked and "安全验证" in t:     # only someone at the PC can do this
+            asked = True
+            _announce_result(post, "post_attention", t)
         await progress(f, t)
 
     async with _lock(acc["id"]):
@@ -231,7 +304,8 @@ async def publish_post(post_id: str, progress: Progress = _noop) -> dict[str, An
 
 def publish_in_background(post_id: str) -> None:
     state.db.update_post(post_id, status="publishing", error=None)
-    asyncio.get_running_loop().create_task(publish_post(post_id))
+    PROGRESS[post_id] = {"progress": 0, "text": "排队中…"}      # counts as work in progress for phones right away
+    asyncio.get_running_loop().create_task(publish_post(post_id, announce=True))
 
 
 def cancel_account_posts(aid: str) -> None:

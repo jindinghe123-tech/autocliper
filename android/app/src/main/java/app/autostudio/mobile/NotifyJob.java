@@ -33,11 +33,13 @@ import java.util.concurrent.Future;
 import java.util.function.BooleanSupplier;
 
 /**
- * Notifications for work on the PC: a run finished, failed, or is waiting for the user's approval.
+ * Notifications for work on the PC: a run finished, failed, or is waiting for the user's approval; content
+ * waits to be approved for publishing; a publish went out or failed.
  *
  * Android only keeps a background app connected if it shows a permanent "running" notification, so this
  * is a JobScheduler job instead. A periodic job checks every PC every 15 minutes; a follow-up job long-polls
- * GET /api/remote/events while something on a PC is still running, starting the moment the app is left.
+ * GET /api/remote/events while something on a PC is still running, starting the moment the app is left,
+ * and again when a PC's next scheduled task starts (the PC says when), so its news is not 15 minutes late.
  * While the phone is in deep sleep Android holds jobs back to its maintenance windows, so a notification
  * can come a few minutes late then.
  */
@@ -45,9 +47,13 @@ public class NotifyJob extends JobService {
     static final String ACTION_OPEN = "app.autostudio.mobile.OPEN_SESSION";
     static final String EXTRA_PC = "pc_id";
     static final String EXTRA_SESSION = "session_id";
+    static final String EXTRA_ROUTE = "route";
+    /** Where in the PC's UI a notification may lead: its own pages only (#/chat/…, #/review/…, #/tasks). */
+    static final String ROUTE = "#/[A-Za-z0-9_/,-]{1,300}";
 
     private static final int JOB_PERIODIC = 7100;
     private static final int[] JOB_FOLLOW = {7101, 7102};      // two ids, so one can schedule the next
+    private static final int JOB_WAKE = 7103;                   // when a PC's next scheduled task starts
     private static final String CH_RUNS = "runs";
     private static final String CH_APPROVALS = "approvals";
     private static final String TAG_RUN = "run";
@@ -55,6 +61,7 @@ public class NotifyJob extends JobService {
     private static final long RUN_FOR_MS = 8 * 60_000L;        // Android stops a job after 10 minutes
     private static final int LONG_POLL_S = 50;
     private static final long STALE_MS = 12 * 3600_000L;      // older news is not worth a buzz
+    private static final long TASK_GRACE_MS = 20_000L;         // start listening this long after a task starts
 
     /** PCs some thread in this process is already polling: two jobs must not show the same news twice. */
     private static final Set<String> polling = ConcurrentHashMap.newKeySet();
@@ -66,10 +73,13 @@ public class NotifyJob extends JobService {
         stopped = false;
         int self = params.getJobId();
         new Thread(() -> {
-            boolean active = pollAll(this, () -> stopped);
+            long[] nextTaskMs = {Long.MAX_VALUE};
+            boolean active = pollAll(this, () -> stopped, nextTaskMs);
             if (!stopped) jobFinished(params, false);
-            // something is still running on a PC: keep listening (a stopped job is re-run by Android itself)
+            // something is still running on a PC: keep listening (a stopped job is re-run by Android itself);
+            // otherwise come back when a PC's next scheduled task starts
             if (active) follow(this, stopped ? -1 : self, 0);
+            else if (nextTaskMs[0] < 24 * 3600_000L) wakeIn(this, nextTaskMs[0] + TASK_GRACE_MS);
         }, "autostudio-notify").start();
         return true;
     }
@@ -144,24 +154,42 @@ public class NotifyJob extends JobService {
                 .build());
     }
 
+    /** Listen again once delayMs have passed: a PC's next scheduled task will be running by then. */
+    static void wakeIn(Context ctx, long delayMs) {
+        JobScheduler js = ctx.getSystemService(JobScheduler.class);
+        if (js == null || !enabled(ctx) || pairedPcs(ctx).isEmpty()) return;
+        long at = System.currentTimeMillis() + delayMs;
+        // already set for about then: rescheduling would only stop the wake job if it is running right now
+        if (js.getPendingJob(JOB_WAKE) != null && Math.abs(prefs(ctx).getLong("wake_at", 0) - at) < 60_000L) return;
+        prefs(ctx).edit().putLong("wake_at", at).apply();
+        js.schedule(new JobInfo.Builder(JOB_WAKE, new ComponentName(ctx, NotifyJob.class))
+                .setMinimumLatency(delayMs)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .build());
+    }
+
     static void cancel(Context ctx) {
         JobScheduler js = ctx.getSystemService(JobScheduler.class);
         if (js == null) return;
         js.cancel(JOB_PERIODIC);
+        js.cancel(JOB_WAKE);
         for (int id : JOB_FOLLOW) js.cancel(id);
     }
 
     // ------------------------------------------------------------------ polling
 
-    /** Poll every paired PC; true when something was still running on one of them when time ran out. */
-    private static boolean pollAll(Context ctx, BooleanSupplier stop) {
+    /**
+     * Poll every paired PC; true when something was still running on one of them when time ran out.
+     * nextTaskMs[0] becomes the soonest start of a scheduled task on any of them.
+     */
+    private static boolean pollAll(Context ctx, BooleanSupplier stop, long[] nextTaskMs) {
         if (!enabled(ctx)) return false;
         List<JSONObject> pcs = pairedPcs(ctx);
         if (pcs.isEmpty()) return false;
         long deadline = SystemClock.elapsedRealtime() + RUN_FOR_MS;
         ExecutorService ex = Executors.newFixedThreadPool(pcs.size());
         List<Future<Boolean>> results = new ArrayList<>();
-        for (JSONObject pc : pcs) results.add(ex.submit(() -> pollPc(ctx, pc, stop, deadline)));
+        for (JSONObject pc : pcs) results.add(ex.submit(() -> pollPc(ctx, pc, stop, deadline, nextTaskMs)));
         boolean active = false;
         for (Future<Boolean> f : results) {
             try {
@@ -177,7 +205,7 @@ public class NotifyJob extends JobService {
      * Long-poll one PC until nothing runs there any more or time is up. Returns whether something was still
      * running. The first call to a PC only learns where its feed is: old news never buzzes.
      */
-    private static boolean pollPc(Context ctx, JSONObject pc, BooleanSupplier stop, long deadline) {
+    private static boolean pollPc(Context ctx, JSONObject pc, BooleanSupplier stop, long deadline, long[] nextTaskMs) {
         String pcId = pc.optString("pc_id");
         if (!polling.add(pcId)) return false;      // another job has this PC and will carry on
         try {
@@ -211,6 +239,11 @@ public class NotifyJob extends JobService {
                 for (int i = 0; events != null && i < events.length(); i++) show(ctx, pc, events.getJSONObject(i));
                 cursors.edit().putString(pcId, d.optString("boot") + ":" + d.optLong("cursor")).apply();
                 active = d.optInt("active") > 0;
+                if (!d.isNull("next_task_in") && d.has("next_task_in")) {
+                    synchronized (nextTaskMs) {
+                        nextTaskMs[0] = Math.min(nextTaskMs[0], d.optLong("next_task_in") * 1000);
+                    }
+                }
                 if (!active) return false;
             }
             return active;
@@ -230,7 +263,7 @@ public class NotifyJob extends JobService {
         NotificationChannel runs = new NotificationChannel(CH_RUNS, "任务完成或出错", NotificationManager.IMPORTANCE_HIGH);
         runs.setDescription("电脑上的任务做完了，或者出错停下了");
         NotificationChannel ask = new NotificationChannel(CH_APPROVALS, "等你批准", NotificationManager.IMPORTANCE_HIGH);
-        ask.setDescription("Agent 想做一件需要你同意的事，正停在那里等你");
+        ask.setDescription("Agent 想做一件需要你同意的事，或者做好的内容等你批准发布");
         nm.createNotificationChannels(Arrays.asList(runs, ask));
     }
 
@@ -240,22 +273,28 @@ public class NotifyJob extends JobService {
         String type = ev.optString("type");
         String sid = ev.optString("session_id");
         String pcId = pc.optString("pc_id");
-        if (nm == null || !sid.matches("[\\w-]+")) return;
-        int id = (pcId + "/" + sid).hashCode();     // one notification per conversation, replaced by news
-        if (!"approval_needed".equals(type)) nm.cancel(TAG_APPROVAL, id);     // answered, finished or failed
+        boolean hasSession = sid.matches("[\\w-]+");
+        String route = ev.optString("route");
+        if (!route.matches(ROUTE)) route = hasSession ? "#/chat/" + sid : "";
+        if (nm == null || route.isEmpty()) return;
+        // one notification per conversation (a task's runs and the posts they made share it), replaced by news
+        String key = hasSession ? sid : route;
+        int id = (pcId + "/" + key).hashCode();
+        boolean waiting = "approval_needed".equals(type) || "posts_pending".equals(type) || "post_attention".equals(type)
+                || ev.optInt("pending") > 0;    // still waiting on the user after this news
+        if (!waiting) nm.cancel(TAG_APPROVAL, id);     // answered, finished or failed
         long when = (long) (ev.optDouble("ts", 0) * 1000);
         if (when > 0 && System.currentTimeMillis() - when > STALE_MS) return;
-        if (MainActivity.isShowing(pcId, sid)) return;      // the user is looking at that conversation
+        if (MainActivity.isShowing(pcId, route)) return;      // the user is looking at that page
         if (!enabled(ctx) || !allowed(ctx)) return;
 
         String title = ev.optString("title", "对话");
         String text = ev.optString("text");
-        String channel = CH_RUNS;
-        String tag = TAG_RUN;
         String head;
         switch (type) {
             case "run_done":
-                head = (ev.optBoolean("task") ? "定时任务做完了：" : "做完了：") + title;
+                head = ev.optInt("pending") > 0 ? "做好了，等你确认发布：" + title
+                        : (ev.optBoolean("task") ? "定时任务做完了：" : "做完了：") + title;
                 if (text.isEmpty()) text = "点开看看结果";
                 break;
             case "run_error":
@@ -265,18 +304,32 @@ public class NotifyJob extends JobService {
             case "approval_needed":
                 head = "等你批准：" + title;
                 text = "Agent 想要「" + ev.optString("label", ev.optString("name")) + "」，点开选择允许还是拒绝";
-                channel = CH_APPROVALS;
-                tag = TAG_APPROVAL;
+                break;
+            case "posts_pending":
+                head = "等你确认发布：" + title;
+                if (text.isEmpty()) text = "点开预览，一键批准发布";
+                break;
+            case "post_published":
+                head = "已发布：「" + title + "」";
+                break;
+            case "post_failed":
+                head = "发布失败：「" + title + "」";
+                break;
+            case "post_attention":
+                head = "需要你在电脑上操作：「" + title + "」";
                 break;
             default:
                 return;
         }
+        String channel = waiting ? CH_APPROVALS : CH_RUNS;
+        String tag = waiting ? TAG_APPROVAL : TAG_RUN;
+        if (waiting) nm.cancel(TAG_RUN, id);
         ensureChannels(ctx);
         Intent open = new Intent(ctx, MainActivity.class)
                 .setAction(ACTION_OPEN)
-                .setData(Uri.parse("autostudio://session/" + pcId + "/" + sid))    // one PendingIntent each
+                .setData(Uri.parse("autostudio://open/" + pcId + "/" + Uri.encode(key)))    // one PendingIntent each
                 .putExtra(EXTRA_PC, pcId)
-                .putExtra(EXTRA_SESSION, sid)
+                .putExtra(EXTRA_ROUTE, route)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         PendingIntent tap = PendingIntent.getActivity(ctx, id, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
@@ -290,6 +343,7 @@ public class NotifyJob extends JobService {
                 .setSubText(pc.optString("pc_name"))
                 .setContentIntent(tap)
                 .setAutoCancel(true)
+                .setOnlyAlertOnce(true)     // "waiting for approval" turning into "the run is done" buzzes once
                 .setCategory(TAG_APPROVAL.equals(tag) ? Notification.CATEGORY_REMINDER : Notification.CATEGORY_STATUS);
         if (when > 0) b.setWhen(when).setShowWhen(true);
         try {

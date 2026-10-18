@@ -80,9 +80,11 @@ CREATE INDEX IF NOT EXISTS idx_posts_status ON social_posts(status, created_at);
 """
 
 # Columns added after the first release: (table, column, definition)
-MIGRATIONS = [("tasks", "auto_publish", "INTEGER NOT NULL DEFAULT 0")]
+MIGRATIONS = [("tasks", "auto_publish", "INTEGER NOT NULL DEFAULT 0"), ("tasks", "watch_dir", "TEXT"),
+              ("tasks", "watch_seen", "TEXT")]
 
-TASK_FIELDS = ("name", "prompt", "cron", "enabled", "provider", "model", "allow_dangerous", "webhook", "auto_publish")
+TASK_FIELDS = ("name", "prompt", "cron", "enabled", "provider", "model", "allow_dangerous", "webhook", "auto_publish",
+               "watch_dir")
 TASK_BOOLS = ("enabled", "allow_dangerous", "auto_publish")
 
 
@@ -193,11 +195,15 @@ class DB:
             self._exec(f"UPDATE tasks SET {sets}, updated_at=? WHERE id=?", (*vals.values(), time.time(), tid))
         return self.get_task(tid)
 
+    def set_task_seen(self, tid: str, seen: dict[str, Any]) -> None:
+        """The material-folder ledger: which files earlier runs were already given (see scheduler.scan_new)."""
+        self._exec("UPDATE tasks SET watch_seen=? WHERE id=?", (json.dumps(seen, ensure_ascii=False), tid))
+
     def delete_task(self, tid: str) -> None:
         self._exec("DELETE FROM tasks WHERE id=?", (tid,))
         self._exec("DELETE FROM task_runs WHERE task_id=?", (tid,))
 
-    def start_task_run(self, tid: str, session_id: str) -> int:
+    def start_task_run(self, tid: str, session_id: str | None) -> int:
         cur = self._exec(
             "INSERT INTO task_runs (task_id, session_id, started_at, status) VALUES (?,?,?,?)",
             (tid, session_id, time.time(), "running"),

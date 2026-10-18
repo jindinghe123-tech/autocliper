@@ -5,7 +5,7 @@ import { confirmDialog, h, icon, toast } from "./dom.js";
 import { showFiles } from "./files.js";
 import { disconnectThisPhone, showPhone, stopPhoneView } from "./phone.js";
 import { showSettings } from "./settings.js";
-import { showPublish, stopPublishView } from "./social.js";
+import { showPublish, showReview, stopPublishView } from "./social.js";
 import { anyProviderReady, emit, inPhoneApp, modelLabel, navigate, on, providerName, refreshSessions, refreshSettings, store } from "./store.js";
 import { showSubtitles, stopSubtitleView } from "./subtitles.js";
 import { showTasks } from "./tasks.js";
@@ -116,6 +116,7 @@ async function route() {
       case "subtitles": await showSubtitles(main, params); break;
       case "tasks": await showTasks(main); break;
       case "publish": await showPublish(main); break;
+      case "review": await showReview(main, parts[1]); break;
       case "files": await showFiles(main, params); break;
       case "settings": await showSettings(main, parts[1] || "models", params); break;
       default: await showChat(main, parts[1] || null);

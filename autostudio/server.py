@@ -33,7 +33,7 @@ from .providers.catalog import fetch_chatgpt_catalog
 from .providers.chatgpt_auth import chatgpt_auth
 from .remote import (APK_FILE, COOKIE, COOKIE_MAX_AGE, DEVICE_PATHS, NOTICE_MAX_WAIT, PUBLIC_PATHS, PairError,
                      device_label, firewall_fix, firewall_status, remote)
-from .scheduler import TaskScheduler
+from .scheduler import TaskScheduler, normalize_watch_dir
 from .tools import CATEGORY_LABELS, REGISTRY
 from .media.tts import EDGE_PERSONAS, TTSError, synthesize
 from .tools.creative import EFFECT_NAMES, TRANSITIONS, TTS_VOICES
@@ -383,9 +383,18 @@ async def approve(sid: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
 # tasks
 
 def _task_view(t: dict[str, Any]) -> dict[str, Any]:
-    return {**t, "enabled": bool(t["enabled"]), "allow_dangerous": bool(t["allow_dangerous"]),
+    view = {k: v for k, v in t.items() if k != "watch_seen"}
+    return {**view, "enabled": bool(t["enabled"]), "allow_dangerous": bool(t["allow_dangerous"]),
             "auto_publish": bool(t.get("auto_publish")),
             "next_run": state.scheduler.next_run(t["id"]) if state.scheduler else None}
+
+
+def _task_watch_dir(body: dict[str, Any]) -> None:
+    if "watch_dir" in body:
+        try:
+            body["watch_dir"] = normalize_watch_dir(body.get("watch_dir"), state.settings.workspace)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
 
 @app.get("/api/tasks")
@@ -403,6 +412,7 @@ async def create_task(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         state.scheduler.validate_cron(body["cron"])
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    _task_watch_dir(body)
     t = state.db.create_task(**body)
     state.scheduler.sync(t["id"])
     return _task_view(state.db.get_task(t["id"]) or t)
@@ -418,6 +428,7 @@ async def update_task(tid: str, body: dict[str, Any] = Body(...)) -> dict[str, A
             state.scheduler.validate_cron(body["cron"])
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+    _task_watch_dir(body)
     t = state.db.update_task(tid, **body)
     state.scheduler.sync(tid)
     return _task_view(t or {})
@@ -436,8 +447,8 @@ async def run_task_now(tid: str) -> dict[str, Any]:
     assert state.scheduler
     if not state.db.get_task(tid):
         raise HTTPException(404, "任务不存在")
-    sid = await state.scheduler.run_task(tid)
-    return {"ok": True, "session_id": sid}
+    r = await state.scheduler.run_task(tid) or {}
+    return {"ok": True, "session_id": r.get("session_id"), "skipped": bool(r.get("skipped")), "message": r.get("message", "")}
 
 
 @app.get("/api/tasks/{tid}/runs")
@@ -536,7 +547,10 @@ async def social_youtube_callback(state_: str = Query("", alias="state"), code: 
 
 
 @app.get("/api/social/posts")
-async def social_posts(status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+async def social_posts(status: str | None = None, limit: int = 100, ids: str = "") -> list[dict[str, Any]]:
+    if ids:     # the review page a phone notification opens
+        posts = [state.db.get_post(i) for i in ids.split(",")[:50] if i]
+        return [social.post_view(p) for p in posts if p]
     return social.list_posts(status, max(1, min(500, limit)))
 
 
@@ -746,6 +760,11 @@ def _run_notice(sid: str, ev: dict[str, Any]) -> None:
         return
     if ev["type"] == "approval_needed":
         ev = {**ev, "label": TOOL_LABELS.get(ev.get("name") or "", ev.get("name") or "")}
+    ev = {"route": f"#/chat/{sid}", **ev}
+    if ev["type"] == "run_done":
+        pending = state.db.list_posts("pending", 20, session_id=sid)
+        if pending:     # the news is "approve these": open the review page, not the conversation
+            ev = {**ev, **social.pending_notice(sid, pending)}
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", str(ev.get("text") or ""))     # markdown → plain text
     text = " ".join(re.sub(r"[*`#]+", "", text).split())
     remote.notices.publish({**ev, "text": text[:300], "session_id": sid, "title": sess.get("title") or "对话",
@@ -760,7 +779,9 @@ async def remote_events(after: int | None = None, boot: str = "", wait: int = 0)
     """
     events, cursor = await remote.notices.wait(after, boot, min(max(wait, 0), NOTICE_MAX_WAIT))
     active = sum(1 for r in state.runs.runs.values() if not r.done) if state.runs else 0
-    return {"boot": remote.notices.boot, "cursor": cursor, "events": events, "active": active}
+    active += len(social.PROGRESS)      # a publish going on: its result is worth staying for
+    nxt = state.scheduler.seconds_to_next() if state.scheduler and state.scheduler.sched.running else None
+    return {"boot": remote.notices.boot, "cursor": cursor, "events": events, "active": active, "next_task_in": nxt}
 
 
 @app.get("/api/remote/whoami")

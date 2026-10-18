@@ -408,6 +408,15 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius
 .post-live .bar i { display: block; height: 100%; background: var(--grad); transition: width .4s; }
 .setup-steps { padding-left: 20px; margin: 0 0 16px; display: grid; gap: 8px; font-size: 13.5px; }
 @media (max-width: 640px) { .post-thumb { width: 72px; height: 96px; } }
+.review-page { max-width: 560px; }
+.review-list { display: grid; gap: 14px; }
+.review-media { display: block; width: 100%; max-height: 62vh; border-radius: 12px; background: #000; }
+.review-images { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; }
+.review-images img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 8px; cursor: zoom-in; background: var(--panel-3); }
+.review-desc { font-size: 14px; color: var(--text-2); margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-actions { display: grid; gap: 10px; margin-top: 14px; }
+.review-actions .row { justify-content: center; }
+.btn.review-approve { width: 100%; justify-content: center; padding: 13px 16px; font-size: 16px; margin-bottom: 4px; }
 
 /* plan_update checklist */
 .plan-list { display: grid; gap: 3px; padding: 8px 12px 10px; font-size: 13px; }

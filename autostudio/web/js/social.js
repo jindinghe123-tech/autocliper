@@ -40,6 +40,122 @@ function thumb(c) {
   (c.images || []).length > 1 ? h("span", { class: "post-count" }, `${c.images.length} 张`) : null);
 }
 
+async function startPublish(p, edits = {}) {
+  try { await post(`/api/social/posts/${p.id}/publish`, edits); toast("开始发布", "ok"); return true; } catch (e) { toast(e.message, "err"); return false; }
+}
+
+function editPost(p, onDone) {
+  const c = p.content || {};
+  const max = p.platform === "xiaohongshu" ? 20 : 100;
+  const title = h("input", { class: "input", value: c.title || "", maxlength: max });
+  const desc = h("textarea", { class: "textarea", rows: 7 });
+  desc.value = c.description || "";
+  const tags = h("input", { class: "input", value: (c.tags || []).join(" "), placeholder: "用空格分隔，不用写 #" });
+  const m = modal({
+    title: `修改后发布到 ${p.platform_label}「${p.account_name}」`,
+    body: h("div", {},
+      h("div", { class: "field" }, h("label", {}, `标题（≤${max} 字）`), title),
+      h("div", { class: "field" }, h("label", {}, p.platform === "youtube" ? "简介" : "正文"), desc),
+      h("div", { class: "field" }, h("label", {}, "话题标签"), tags)),
+    footer: [h("button", { class: "btn", onclick: () => m.close() }, "取消"),
+      h("button", { class: "btn primary", onclick: async () => {
+        m.close();
+        await startPublish(p, { title: title.value.trim(), description: desc.value, tags: tags.value.split(/[\s,，#]+/).filter(Boolean) });
+        onDone();
+      } }, "发布")],
+  });
+}
+
+// ---- 确认发布: the page a phone notification opens. Watch it, read the text, approve with one tap.
+export async function showReview(main, idsPart) {
+  stopPublishView();
+  const ids = String(idsPart || "").split(",").filter((x) => /^[\w-]+$/.test(x)).slice(0, 50);
+  const top = h("div");
+  const list = h("div", { class: "review-list" });
+  main.innerHTML = "";
+  main.append(
+    h("div", { class: "page-head" },
+      h("button", { class: "btn ghost icon-only menu-btn", html: icon("menu"), onclick: () => document.getElementById("sidebar").classList.toggle("open") }),
+      h("h1", {}, "确认发布"), h("div", { class: "grow" }),
+      h("a", { class: "btn sm ghost", href: "#/publish", html: icon("upload") + "发布页" })),
+    h("div", { class: "page-body" }, h("div", { class: "page-narrow review-page" }, top, list)));
+
+  let posts = [];
+  const cards = new Map();     // post id -> [state key, element]: only changed cards are redrawn (a playing video keeps playing)
+
+  async function load() {
+    try { posts = ids.length ? await get(`/api/social/posts?ids=${ids.join(",")}`) : []; } catch (e) { return toast(e.message, "err"); }
+    const pending = posts.filter((p) => p.status === "pending");
+    top.innerHTML = "";
+    if (pending.length > 1) {
+      top.append(h("button", { class: "btn primary review-approve", html: icon("check") + `全部批准发布（${pending.length} 条）`, onclick: async (e) => {
+        e.currentTarget.disabled = true;
+        for (const p of pending) await startPublish(p);
+        load();
+      } }));
+    }
+    if (!posts.length) {
+      list.innerHTML = "";
+      list.append(h("div", { class: "card small muted" }, "这些内容已经不在了（可能被删除了）。", h("a", { href: "#/publish" }, "去「发布」页看看")));
+      return;
+    }
+    for (const p of posts) {
+      const key = `${p.status}|${p.live?.text || ""}|${p.live?.progress || 0}|${p.error || ""}|${p.url || ""}`;
+      const old = cards.get(p.id);
+      if (old && old[0] === key) continue;
+      const el = reviewCard(p);
+      if (old) old[1].replaceWith(el); else list.append(el);
+      cards.set(p.id, [key, el]);
+    }
+  }
+
+  function reviewCard(p) {
+    const c = p.content || {};
+    const [label, cls] = STATUS[p.status] || [p.status, ""];
+    const media = c.video
+      ? h("video", { class: "review-media", src: rawUrl(c.video), poster: c.cover ? rawUrl(c.cover) : null, controls: true, playsinline: true, preload: "metadata" })
+      : h("div", { class: "review-images" }, (c.images || []).map((f) => h("img", { src: rawUrl(f), loading: "lazy", onclick: () => window.open(rawUrl(f), "_blank") })));
+    const actions = h("div", { class: "review-actions" });
+    if (p.status === "pending") {
+      actions.append(
+        h("button", { class: "btn primary review-approve", html: icon("check") + "批准发布", onclick: async (e) => {
+          e.currentTarget.disabled = true;
+          await startPublish(p);
+          load();
+        } }),
+        h("div", { class: "row", style: { gap: "8px" } },
+          h("button", { class: "btn sm", html: icon("edit") + "改一下再发", onclick: () => editPost(p, load) }),
+          h("button", { class: "btn sm ghost", html: icon("x") + "不发了", onclick: async () => {
+            if (!(await confirmDialog("这条内容不发了？"))) return;
+            await post(`/api/social/posts/${p.id}/cancel`).catch((e) => toast(e.message, "err"));
+            load();
+          } })));
+    } else if (p.status === "failed" || p.status === "cancelled") {
+      actions.append(h("button", { class: "btn sm", html: icon("refresh") + "重新发布", onclick: async () => { await startPublish(p); load(); } }));
+    }
+    if (p.url) actions.append(h("a", { class: "btn sm", href: p.url, target: "_blank", rel: "noopener", html: icon("external") + (p.platform === "youtube" ? "打开视频" : "笔记管理") }));
+    const live = p.status === "publishing"
+      ? h("div", { class: "post-live" }, h("div", { class: "bar" }, h("i", { style: { width: `${Math.round((p.live?.progress || 0) * 100)}%` } })),
+        h("span", { class: "small muted" }, p.live?.text || "发布中…")) : null;
+    return h("div", { class: "card review-card" }, media,
+      h("div", { class: "row wrap", style: { gap: "6px", marginTop: "12px" } }, h("span", { class: `tag ${cls}` }, label),
+        h("span", { class: "small", style: { color: PLAT[p.platform]?.color } }, p.platform_label), h("span", { class: "small" }, p.account_name)),
+      h("div", { class: "post-title" }, c.title || basename(c.video || "")),
+      c.description ? h("div", { class: "review-desc" }, c.description) : null,
+      (c.tags || []).length ? h("div", { class: "small", style: { color: "var(--accent-2)", marginTop: "6px" } }, c.tags.map((t) => `#${t}`).join(" ")) : null,
+      live,
+      p.status === "published" ? h("div", { class: "notice", html: icon("check") }, h("div", {}, "已经发出去了")) : null,
+      p.error ? h("div", { class: "notice err", html: icon("alert") }, h("div", {}, p.error)) : null,
+      actions,
+      p.session_id ? h("a", { class: "small muted", href: `#/chat/${p.session_id}`, style: { display: "inline-block", marginTop: "10px" } }, "看看 Agent 是怎么做的 →") : null);
+  }
+
+  await load();
+  timer = setInterval(() => {
+    if (document.visibilityState === "visible" && posts.some((p) => p.status === "publishing")) load();
+  }, 2000);
+}
+
 export async function showPublish(main) {
   stopPublishView();
   main.innerHTML = "";
@@ -144,7 +260,7 @@ export async function showPublish(main) {
     if (isPending) {
       actions.append(
         h("button", { class: "btn sm primary", html: icon("upload") + "发布", onclick: () => publishPost(p) }),
-        h("button", { class: "btn sm", html: icon("edit") + "修改后发布", onclick: () => editPost(p) }),
+        h("button", { class: "btn sm", html: icon("edit") + "修改后发布", onclick: () => editPost(p, loadPosts) }),
         h("button", { class: "btn sm ghost", html: icon("x") + "不发了", onclick: async () => { await post(`/api/social/posts/${p.id}/cancel`); loadPosts(); } }));
     } else {
       if (p.url) actions.append(h("a", { class: "btn sm", href: p.url, target: "_blank", rel: "noopener", html: icon("external") + (p.platform === "youtube" ? "打开视频" : "笔记管理") }));
@@ -170,29 +286,8 @@ export async function showPublish(main) {
   }
 
   async function publishPost(p, edits = {}) {
-    try { await post(`/api/social/posts/${p.id}/publish`, edits); toast("开始发布", "ok"); } catch (e) { toast(e.message, "err"); }
+    await startPublish(p, edits);
     loadPosts();
-  }
-
-  function editPost(p) {
-    const c = p.content || {};
-    const max = p.platform === "xiaohongshu" ? 20 : 100;
-    const title = h("input", { class: "input", value: c.title || "", maxlength: max });
-    const desc = h("textarea", { class: "textarea", rows: 7 });
-    desc.value = c.description || "";
-    const tags = h("input", { class: "input", value: (c.tags || []).join(" "), placeholder: "用空格分隔，不用写 #" });
-    const m = modal({
-      title: `修改后发布到 ${p.platform_label}「${p.account_name}」`,
-      body: h("div", {},
-        h("div", { class: "field" }, h("label", {}, `标题（≤${max} 字）`), title),
-        h("div", { class: "field" }, h("label", {}, p.platform === "youtube" ? "简介" : "正文"), desc),
-        h("div", { class: "field" }, h("label", {}, "话题标签"), tags)),
-      footer: [h("button", { class: "btn", onclick: () => m.close() }, "取消"),
-        h("button", { class: "btn primary", onclick: async () => {
-          m.close();
-          await publishPost(p, { title: title.value.trim(), description: desc.value, tags: tags.value.split(/[\s,，#]+/).filter(Boolean) });
-        } }, "发布")],
-    });
   }
 
   // ---- 小红书: login in a real browser window, one profile per account

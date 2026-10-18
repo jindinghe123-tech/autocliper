@@ -99,17 +99,17 @@ public class MainActivity extends Activity {
     private WebChromeClient.CustomViewCallback fullscreenCallback;
     private Runnable afterStoragePermission;
     private boolean clearHistoryOnLoad;
-    private String openSession;          // a notification asked for this conversation...
-    private String openSessionPc = "";   // ...on this PC
+    private String openRoute;            // a notification asked for this page (#/chat/…, #/review/…)...
+    private String openRoutePc = "";     // ...on this PC
 
     // what is on screen, for NotifyJob (which may run while the app is open)
     private static volatile boolean inFront;
     private static volatile String frontPc = "";
     private static volatile String frontUrl = "";
 
-    /** Is the user looking at this conversation right now? Then a notification about it is only noise. */
-    static boolean isShowing(String pc, String session) {
-        return inFront && pc.equals(frontPc) && frontUrl.matches(".*#/chat/" + Pattern.quote(session) + "([/?].*)?");
+    /** Is the user looking at this page right now? Then a notification about it is only noise. */
+    static boolean isShowing(String pc, String route) {
+        return inFront && pc.equals(frontPc) && frontUrl.matches(".*" + Pattern.quote(route) + "([/?].*)?");
     }
 
     // ------------------------------------------------------------------ lifecycle
@@ -131,7 +131,7 @@ public class MainActivity extends Activity {
         pcView.setVisibility(View.GONE);
         setupConnectView();
         setupPcView();
-        String pick = takeOpenIntent(getIntent()) ? "&pc=" + Uri.encode(openSessionPc) : "";
+        String pick = takeOpenIntent(getIntent()) ? "&pc=" + Uri.encode(openRoutePc) : "";
         connectView.loadUrl(CONNECT_URL + "?auto=1" + pick);
         NotifyJob.ensureChannels(this);
         NotifyJob.schedule(this);
@@ -142,31 +142,33 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         if (!takeOpenIntent(intent)) return;
-        if (pcShown && (openSessionPc.isEmpty() || openSessionPc.equals(pcId))) {
-            String sid = openSession;
-            openSession = null;
+        if (pcShown && (openRoutePc.isEmpty() || openRoutePc.equals(pcId))) {
+            String route = openRoute;
+            openRoute = null;
             hideFullscreen();
-            goToSession(sid);
+            goTo(route);
             return;
         }
-        // another PC (or none yet): the connect screen connects to it, then openPc() opens the conversation
+        // another PC (or none yet): the connect screen connects to it, then openPc() opens the page
         if (pcShown) showConnect(event("home", null));
-        connectView.evaluateJavascript("window.connectTo && window.connectTo(" + JSONObject.quote(openSessionPc) + ")", null);
+        connectView.evaluateJavascript("window.connectTo && window.connectTo(" + JSONObject.quote(openRoutePc) + ")", null);
     }
 
-    /** A tapped notification: remember which conversation to open. */
+    /** A tapped notification: remember which page to open. */
     private boolean takeOpenIntent(Intent i) {
         if (i == null || !NotifyJob.ACTION_OPEN.equals(i.getAction())) return false;
-        String sid = i.getStringExtra(NotifyJob.EXTRA_SESSION);
-        if (sid == null || !sid.matches("[\\w-]+")) return false;
+        String route = i.getStringExtra(NotifyJob.EXTRA_ROUTE);
+        String sid = i.getStringExtra(NotifyJob.EXTRA_SESSION);     // notifications shown by version 1.1
+        if ((route == null || !route.matches(NotifyJob.ROUTE)) && sid != null && sid.matches("[\\w-]+")) route = "#/chat/" + sid;
+        if (route == null || !route.matches(NotifyJob.ROUTE)) return false;
         String pc = i.getStringExtra(NotifyJob.EXTRA_PC);
-        openSession = sid;
-        openSessionPc = pc == null ? "" : pc;
+        openRoute = route;
+        openRoutePc = pc == null ? "" : pc;
         return true;
     }
 
-    private void goToSession(String sid) {
-        pcView.evaluateJavascript("location.hash=" + JSONObject.quote("#/chat/" + sid), null);
+    private void goTo(String route) {
+        pcView.evaluateJavascript("location.hash=" + JSONObject.quote(route), null);
     }
 
     @Override
@@ -487,14 +489,14 @@ public class MainActivity extends Activity {
         pcShown = true;
         pcView.setVisibility(View.VISIBLE);
         connectView.setVisibility(View.GONE);
-        String sid = openSession != null && (openSessionPc.isEmpty() || openSessionPc.equals(pcId)) ? openSession : null;
-        openSession = null;
+        String route = openRoute != null && (openRoutePc.isEmpty() || openRoutePc.equals(pcId)) ? openRoute : null;
+        openRoute = null;
         String current = pcView.getUrl();
         if (pcStale || current == null || !isPcUrl(Uri.parse(current))) {
-            pcView.loadUrl(pcBase + "/" + (sid != null ? "#/chat/" + sid : ""));
+            pcView.loadUrl(pcBase + "/" + (route != null ? route : ""));
             clearHistoryOnLoad = true;
-        } else if (sid != null) {
-            goToSession(sid);
+        } else if (route != null) {
+            goTo(route);
         }
         pcStale = false;
         maybeAskNotifyPermission();

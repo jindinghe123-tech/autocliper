@@ -99,6 +99,9 @@ async def social_publish(ctx: ToolContext, accounts: list[str] | str, video: str
     out: dict[str, Any] = {"ok": any(r["status"] in ("已发布", "待确认") for r in results), "results": results}
     if mode == "queue":
         out["message"] = "已放进「发布 → 待确认」，用户在 AutoStudio 发布页确认后才会发出。"
+        if ctx.headless:    # nobody is watching this run: ask on the phone now, not only when the run ends
+            social.announce_pending(ctx.session_id)
+            out["message"] += "用户的手机已经收到确认通知。"
     if shots:
         out["images"] = shots
     return out

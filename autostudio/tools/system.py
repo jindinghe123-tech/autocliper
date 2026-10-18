@@ -16,6 +16,7 @@ import httpx
 from .. import state
 from ..config import MEMORY_FILE
 from ..media import ffmpeg as ff
+from ..scheduler import normalize_watch_dir
 from .registry import ToolContext, ToolError, boolean, integer, obj, s, tool
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".tmp", ".frames", ".venv"}
@@ -251,11 +252,16 @@ async def download_media(ctx: ToolContext, url: str, audio_only: bool = False, m
 
 # ---- scheduled tasks ------------------------------------------------------------
 
+WATCH_DIR_HELP = ("素材文件夹（可选）：填了以后，每次运行只把上次之后新放进这个文件夹的文件交给你（路径会附在指令后面），"
+                  "没有新文件就不运行。相对路径表示工作区里的文件夹，不存在会自动创建。")
+
+
 def _task_view(t: dict[str, Any]) -> dict[str, Any]:
     nxt = state.scheduler.next_run(t["id"]) if state.scheduler else None
     return {"id": t["id"], "name": t["name"], "cron": t["cron"], "enabled": bool(t["enabled"]),
             "prompt": t["prompt"][:300], "webhook": bool(t.get("webhook")), "next_run": nxt,
-            "auto_publish": bool(t.get("auto_publish")), "last_status": t.get("last_status")}
+            "auto_publish": bool(t.get("auto_publish")), "last_status": t.get("last_status"),
+            "watch_dir": t.get("watch_dir") or None}
 
 
 @tool("task_create",
@@ -265,14 +271,19 @@ def _task_view(t: dict[str, Any]) -> dict[str, Any]:
       obj(["name", "prompt", "cron"], name=s("任务名"), prompt=s("每次执行时给 agent 的完整指令（要写清楚输入在哪、输出到哪）"),
           cron=s("cron 表达式"), webhook=s("结果推送地址（可选）"),
           allow_dangerous=boolean("是否允许执行命令行等危险操作（无人值守，默认 false）"),
-          auto_publish=boolean("发布到社交平台时直接发出、不等用户确认（默认 false：进入待确认队列）")), category="task")
+          auto_publish=boolean("发布到社交平台时直接发出、不等用户确认（默认 false：进入待确认队列，用户手机会收到确认通知）"),
+          watch_dir=s(WATCH_DIR_HELP)), category="task")
 async def task_create(ctx: ToolContext, name: str, prompt: str, cron: str, webhook: str | None = None,
-                      allow_dangerous: bool = False, auto_publish: bool = False) -> dict[str, Any]:
+                      allow_dangerous: bool = False, auto_publish: bool = False, watch_dir: str | None = None) -> dict[str, Any]:
     if not state.scheduler:
         raise ToolError("调度器未运行")
     state.scheduler.validate_cron(cron)
+    try:
+        folder = normalize_watch_dir(watch_dir, state.settings.workspace)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
     t = state.db.create_task(name=name, prompt=prompt, cron=cron, enabled=True, webhook=webhook,
-                             allow_dangerous=allow_dangerous, auto_publish=auto_publish)
+                             allow_dangerous=allow_dangerous, auto_publish=auto_publish, watch_dir=folder)
     state.scheduler.sync(t["id"])
     return {"ok": True, "task": _task_view(state.db.get_task(t["id"]) or t)}
 
@@ -282,15 +293,21 @@ async def task_list(ctx: ToolContext) -> dict[str, Any]:
     return {"tasks": [_task_view(t) for t in state.db.list_tasks()]}
 
 
-@tool("task_update", "修改定时任务（名称、指令、cron、启用/停用、webhook、是否自动发布）。",
+@tool("task_update", "修改定时任务（名称、指令、cron、启用/停用、webhook、是否自动发布、素材文件夹）。",
       obj(["id"], id=s("任务 id"), name=s("新名称"), prompt=s("新指令"), cron=s("新 cron"),
           enabled=boolean("启用/停用"), webhook=s("推送地址"),
-          auto_publish=boolean("发布到社交平台时是否直接发出（不等用户确认）")), category="task")
+          auto_publish=boolean("发布到社交平台时是否直接发出（不等用户确认）"),
+          watch_dir=s(WATCH_DIR_HELP + "填空字符串表示不再监视文件夹。")), category="task")
 async def task_update(ctx: ToolContext, id: str, **fields: Any) -> dict[str, Any]:
     if not state.db.get_task(id):
         raise ToolError(f"任务不存在：{id}")
     if fields.get("cron") and state.scheduler:
         state.scheduler.validate_cron(fields["cron"])
+    if fields.get("watch_dir") is not None:
+        try:
+            fields["watch_dir"] = normalize_watch_dir(fields["watch_dir"], state.settings.workspace) or ""
+        except ValueError as e:
+            raise ToolError(str(e)) from e
     t = state.db.update_task(id, **{k: v for k, v in fields.items() if v is not None})
     if state.scheduler:
         state.scheduler.sync(id)
