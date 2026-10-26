@@ -362,41 +362,78 @@ def _dismiss_tips(page: Any) -> None:
         pass
 
 
-def _set_cover(page: Any, cover: str) -> str | None:
-    """Best effort; returns a warning on failure (the default first-frame cover stays)."""
+# The 设置封面 section shows the current cover as a thumbnail (a CSS background image). Hovering it shows
+# 编辑封面, which opens the cover editor: an 上传 slot (an image file input) and a 完成 button.
+COVER_THUMB = ".cover-plugin-preview .cover .default, .cover-plugin-preview .default"
+COVER_MODAL = ".main-cover-editor-modal, .cover-modal"
+COVER_URL_JS = r"""(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return '';
+  const bg = getComputedStyle(el).backgroundImage || '';
+  const img = el.querySelector('img:not(.coverDetectTag)');
+  return bg + '|' + (img ? img.src : '');
+}"""
+
+
+def _cover_now(page: Any) -> str:
     try:
-        btn = None
-        for label in ("设置封面", "修改封面", "编辑封面", "选择封面"):
-            loc = page.get_by_text(label, exact=True).filter(visible=True)
-            if loc.count():
-                btn = loc.first
-                break
-        if btn is None:
-            return "没有找到设置封面的按钮，已使用默认封面"
-        btn.click()
-        page.wait_for_timeout(1200)
-        up = page.get_by_text("上传封面", exact=True).filter(visible=True)
-        if up.count():
-            up.first.click()
-            page.wait_for_timeout(800)
-        inputs = page.locator("input[type=file][accept*='image']")
-        if not inputs.count():
-            raise RuntimeError("no image input")
-        inputs.last.set_input_files(cover)
-        page.wait_for_timeout(2500)
-        for label in ("确定", "完成", "确认"):
-            ok = page.get_by_role("button", name=label, exact=True).filter(visible=True)
-            if ok.count():
-                ok.last.click()
-                page.wait_for_timeout(1500)
+        return page.evaluate(COVER_URL_JS, COVER_THUMB) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _open_cover_editor(page: Any) -> Any:
+    thumb = _visible(page, COVER_THUMB)
+    if thumb is not None:
+        thumb.hover()
+        page.wait_for_timeout(600)
+    for label in ("编辑封面", "修改封面", "选择封面", "上传封面"):
+        loc = page.get_by_text(label, exact=True).filter(visible=True)
+        if loc.count():
+            loc.first.click()
+            break
+    else:
+        raise RuntimeError("没有找到「编辑封面」按钮")
+    modal = page.locator(COVER_MODAL).filter(visible=True)
+    modal.first.wait_for(state="visible", timeout=15000)
+    return modal.first
+
+
+def _set_cover(page: Any, cover: str) -> str | None:
+    """Upload our own cover in the cover editor. Returns a warning if it did not take (the first frame stays)."""
+    before = _cover_now(page)
+    modal = None
+    try:
+        modal = _open_cover_editor(page)
+        inp = modal.locator("input[type=file][accept*='image']")
+        if not inp.count():
+            raise RuntimeError("封面编辑器里没有上传图片的入口")
+        inp.first.set_input_files(cover)
+        page.wait_for_timeout(3000)     # the editor uploads the image and draws it on its canvas
+        done = modal.get_by_text("完成", exact=True).filter(visible=True)
+        if not done.count():
+            done = modal.get_by_role("button", name=re.compile("^(完成|确定|确认)$")).filter(visible=True)
+        if not done.count():
+            raise RuntimeError("封面编辑器里没有「完成」按钮")
+        done.last.click()
+        modal.wait_for(state="hidden", timeout=20000)
+        for _ in range(20):     # the thumbnail switches to the uploaded picture once it is processed
+            if _cover_now(page) != before:
                 return None
-        raise RuntimeError("no confirm button")
+            page.wait_for_timeout(500)
+        return "封面已上传，但页面上的封面没有变化，可能仍是第一帧"
     except Exception as e:  # noqa: BLE001
-        try:
-            page.keyboard.press("Escape")
-        except Exception:  # noqa: BLE001
-            pass
-        return f"封面设置失败（{str(e)[:60]}），已使用默认封面"
+        if modal is not None:
+            try:
+                if modal.is_visible():
+                    close = modal.locator(".close-icon, [class*='close' i]").filter(visible=True)
+                    if close.count():
+                        close.first.click()
+                    else:
+                        page.keyboard.press("Escape")
+            except Exception:  # noqa: BLE001
+                pass
+        return f"封面设置失败（{str(e)[:60]}），用的是第一帧"
 
 
 def _shadow_text_point(page: Any, text: str) -> tuple[float, float] | None:

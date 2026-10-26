@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .. import state
+from .. import power, state
 from ..config import SOCIAL_DIR
 from ..media.ffmpeg import IMAGE_EXTS, VIDEO_EXTS, ffmpeg_bin
 from . import xiaohongshu as xhs
@@ -101,8 +101,17 @@ def pending_notice(session_id: str, pending: list[dict[str, Any]]) -> dict[str, 
     if len(pending) > 3:
         text += f" 等 {len(pending)} 条"
     return {"route": _review_route([p["id"] for p in pending]), "pending": len(pending),
-            "posts": [{"id": p["id"], "title": p["content"].get("title") or ""} for p in pending],
+            "posts": [post_brief(p) for p in pending],
             "text": text + "。点开预览，一键批准发布"}
+
+
+def post_brief(p: dict[str, Any]) -> dict[str, Any]:
+    """What a phone shows about a post waiting for approval (in the notification, or offline)."""
+    c = p.get("content") or {}
+    cover = c.get("cover") or ((c.get("images") or [None])[0])
+    return {"id": p["id"], "title": c.get("title") or "", "description": str(c.get("description") or "")[:600],
+            "tags": list(c.get("tags") or [])[:10], "account": _label(p), "platform": p.get("platform"),
+            "cover": cover, "video": c.get("video"), "session_id": p.get("session_id") or "", "status": p.get("status")}
 
 
 def announce_pending(session_id: str) -> None:
@@ -285,6 +294,7 @@ async def _publish(post: dict[str, Any], progress: Progress, announce: bool) -> 
     async with _lock(acc["id"]):
         state.db.update_post(post_id, status="publishing", error=None)
         PROGRESS[post_id] = {"progress": 0, "text": "准备中…"}
+        power.hold()        # an upload must not be cut off by Windows going to sleep
         try:
             if acc["platform"] == "youtube":
                 res = await yt.upload(lambda: _youtube_token(acc), post["content"], prog)
@@ -300,6 +310,7 @@ async def _publish(post: dict[str, Any], progress: Progress, announce: bool) -> 
             log.warning("publish %s failed: %s", post_id, e)
             return state.db.update_post(post_id, status="failed", error=str(e) or type(e).__name__) or post
         finally:
+            power.release()
             PROGRESS.pop(post_id, None)
         if acc["status"] != "ok":
             state.db.update_account(acc["id"], status="ok")

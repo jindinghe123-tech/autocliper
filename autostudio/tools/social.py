@@ -1,9 +1,11 @@
 """Social publishing tools: list accounts, publish to one or many accounts, check publish history."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .. import social, state
+from ..social import xiaohongshu as xhs
 from .registry import ToolContext, any_of_obj, arr, boolean, integer, obj, s, tool
 
 STATUS_LABEL = {"pending": "待确认", "publishing": "发布中", "published": "已发布", "failed": "失败", "cancelled": "已取消"}
@@ -27,6 +29,41 @@ def _paths(ctx: ToolContext, raw: dict[str, Any]) -> dict[str, Any]:
     if out.get("images"):
         out["images"] = [str(ctx.resolve(i, must_exist=True)) for i in out["images"]]
     return out
+
+
+DELIVERED_COVER = "封面.jpg"    # what deliver puts next to 成片.mp4
+TAGS_MIN = 3
+
+
+def _delivered_cover(video: str | None) -> str | None:
+    if not video:
+        return None
+    p = Path(video).with_name(DELIVERED_COVER)
+    return str(p) if p.is_file() else None
+
+
+def unattended_gaps(platform: str, content: dict[str, Any]) -> list[str]:
+    """What a post made with nobody watching still lacks. The user only taps "approve" on the phone, so
+    the post must already be complete: nothing gets truncated or left at the platform's default."""
+    if platform != "xiaohongshu":
+        return []
+    gaps: list[str] = []
+    title, desc = str(content.get("title") or "").strip(), str(content.get("description") or "").strip()
+    tags = [t for t in content.get("tags") or [] if str(t).strip()]
+    if not title:
+        gaps.append("缺标题")
+    elif len(title) > xhs.TITLE_MAX:
+        gaps.append(f"标题「{title}」有 {len(title)} 个字，小红书最多 {xhs.TITLE_MAX} 个：重新写一个短的，不要截断")
+    if not desc:
+        gaps.append("缺正文：写给看这条笔记的人看的文字（说清楚这条视频是什么、为什么值得看）")
+    elif len(desc) > xhs.DESC_MAX:
+        gaps.append(f"正文 {len(desc)} 个字，超过 {xhs.DESC_MAX} 字：精简一下")
+    if len(tags) < TAGS_MIN:
+        gaps.append(f"话题只有 {len(tags)} 个：至少 {TAGS_MIN} 个，选这个领域里真实有人搜、有人看的话题")
+    if content.get("video") and not content.get("cover"):
+        gaps.append("缺封面：小红书默认拿第一帧当封面，通常很差。先 deliver（交付时会做封面），"
+                    "或者自己做一张（make_cover / studio_run），用 cover 传进来")
+    return gaps
 
 
 @tool("social_publish",
@@ -64,10 +101,23 @@ async def social_publish(ctx: ToolContext, accounts: list[str] | str, video: str
 
     # validate everything before publishing anything
     prepared = []
+    gaps: list[str] = []
     for acc in targets:
         warnings: list[str] = []
-        content = social.prepare(acc["platform"], {**base, **overrides.get(acc["platform"], {})}, warnings)
+        raw = {**base, **overrides.get(acc["platform"], {})}
+        if raw.get("video") and not raw.get("cover") and _delivered_cover(raw["video"]):
+            raw["cover"] = _delivered_cover(raw["video"])
+            warnings.append(f"用了交付文件夹里的封面：{ctx.rel(Path(raw['cover']))}")
+        if ctx.headless:
+            label = social.PLATFORMS[acc["platform"]]["label"]
+            gaps += [f"{label}：{g}" for g in unattended_gaps(acc["platform"], raw) if f"{label}：{g}" not in gaps]
+            if gaps:
+                continue
+        content = social.prepare(acc["platform"], raw, warnings)
         prepared.append((acc, content, warnings))
+    if gaps:
+        return {"ok": False, "published": False, "fix_these": gaps,
+                "message": "没有放进待确认：用户在手机上只会点「同意」，内容必须已经完整。补齐后再调用 social_publish。"}
 
     mode = "queue" if queue_only else ctx.publish_mode
     session = state.db.get_session(ctx.session_id) or {}

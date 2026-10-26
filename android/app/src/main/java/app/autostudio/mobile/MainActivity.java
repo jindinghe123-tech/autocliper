@@ -107,6 +107,10 @@ public class MainActivity extends Activity {
     private static volatile String frontPc = "";
     private static volatile String frontUrl = "";
 
+    static boolean inFront() {
+        return inFront;
+    }
+
     /** Is the user looking at this page right now? Then a notification about it is only noise. */
     static boolean isShowing(String pc, String route) {
         return inFront && pc.equals(frontPc) && frontUrl.matches(".*" + Pattern.quote(route) + "([/?].*)?");
@@ -177,6 +181,7 @@ public class MainActivity extends Activity {
         inFront = true;
         if (pcShown && pcBase != null) checkPcStillThere();
         connectView.evaluateJavascript("window.onNotifyChanged && window.onNotifyChanged()", null);  // back from Settings
+        Updater.resumed(this);
     }
 
     @Override
@@ -381,6 +386,54 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void openUrl(String url) {
             ui.post(() -> openExternally(Uri.parse(url)));
+        }
+
+        /** Mailbox credentials the PC handed out at pairing (for when this phone is away from home). */
+        @JavascriptInterface
+        public void saveRelay(String pcId, String json) {
+            try {
+                Relay.save(MainActivity.this, pcId, new JSONObject(json));
+            } catch (JSONException ignored) {
+            }
+        }
+
+        @JavascriptInterface
+        public void forgetPc(String pcId) {
+            Relay.forget(MainActivity.this, pcId);
+        }
+
+        /** Videos of this PC waiting for approval, as this phone last heard: [{id, title, description, account, tags, cover}]. */
+        @JavascriptInterface
+        public String offlinePosts(String pcId) {
+            JSONArray out = new JSONArray();
+            for (JSONObject p : Posts.pending(MainActivity.this, pcId)) {
+                try {
+                    out.put(new JSONObject(p.toString()).put("cover", Posts.coverDataUri(MainActivity.this, p.optString("id"))));
+                } catch (JSONException ignored) {
+                }
+            }
+            return out.toString();
+        }
+
+        /** Approve (or drop) a post from the connect screen; answers {result: direct | relay | gone | failed}. */
+        @JavascriptInterface
+        public void decide(String id, String pcId, String postId, boolean approve) {
+            pool.execute(() -> {
+                String result = ActionReceiver.decide(MainActivity.this, pcId, postId, approve);
+                NotifyJob.postAnswered(MainActivity.this, pcId, postId, approve, result);
+                if (approve && !"failed".equals(result)) NotifyJob.follow(MainActivity.this, -1, 0);
+                JSONObject o = new JSONObject();
+                try {
+                    o.put("result", result);
+                } catch (JSONException ignored) {
+                }
+                callJs(id, o);
+            });
+        }
+
+        @JavascriptInterface
+        public boolean hasRelay(String pcId) {
+            return Relay.of(MainActivity.this, pcId) != null;
         }
     }
 
@@ -706,6 +759,11 @@ public class MainActivity extends Activity {
     }
 
     static JSONObject http(String method, String url, String body, String token, int connectMs, int readMs) {
+        return httpWith(method, url, body, token, connectMs, readMs, null, null);
+    }
+
+    static JSONObject httpWith(String method, String url, String body, String token, int connectMs, int readMs,
+                               String header, String headerValue) {
         JSONObject out = new JSONObject();
         HttpURLConnection c = null;
         try {
@@ -717,6 +775,7 @@ public class MainActivity extends Activity {
             c.setRequestProperty("X-AutoStudio", "1");
             c.setRequestProperty("User-Agent", "AutoStudioApp/" + BuildConfig.VERSION_NAME + " (Android " + Build.VERSION.RELEASE + "; " + Build.MODEL + ")");
             if (token != null && !token.isEmpty()) c.setRequestProperty("Authorization", "Bearer " + token);
+            if (header != null && headerValue != null) c.setRequestProperty(header, headerValue);
             if (body != null && !body.isEmpty()) {
                 byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
                 c.setDoOutput(true);
@@ -745,6 +804,29 @@ public class MainActivity extends Activity {
             if (c != null) c.disconnect();
         }
         return out;
+    }
+
+    /** GET a small binary (a cover thumbnail); null on any failure. */
+    static byte[] httpBytes(String url, String token, int connectMs, int readMs) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(connectMs);
+            c.setReadTimeout(readMs);
+            c.setRequestProperty("User-Agent", "AutoStudioApp/" + BuildConfig.VERSION_NAME);
+            if (token != null && !token.isEmpty()) c.setRequestProperty("Authorization", "Bearer " + token);
+            if (c.getResponseCode() != 200) return null;
+            try (InputStream s = c.getInputStream(); ByteArrayOutputStream buf = new ByteArrayOutputStream()) {
+                byte[] chunk = new byte[16384];
+                int n;
+                while ((n = s.read(chunk)) > 0 && buf.size() < 4 << 20) buf.write(chunk, 0, n);
+                return buf.toByteArray();
+            }
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
     }
 
     private static String readAll(InputStream in) throws IOException {

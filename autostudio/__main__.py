@@ -25,16 +25,25 @@ def main() -> None:
         os.environ["AUTOSTUDIO_ALLOW_ANY_HOST"] = "1"
         print("⚠️  你正在把 AutoStudio 暴露到非本机地址。它可以读写文件、执行命令，请确保只在可信网络中使用。")
 
+    import logging
+
     import uvicorn
 
+    from . import state
     from .config import DATA_DIR, VERSION
     from .server import app
 
+    if os.environ.get("AUTOSTUDIO_SUPERVISED") == "1":     # run by launcher.py: its log file is the only record
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
-    print(f"\n  AutoStudio v{VERSION}\n  ➜  {url}\n  数据目录：{DATA_DIR}\n  按 Ctrl+C 退出\n")
+    print(f"\n  AutoStudio v{VERSION}\n  ➜  {url}\n  数据目录：{DATA_DIR}\n  按 Ctrl+C 退出\n", flush=True)
     if not args.no_browser:
         threading.Thread(target=lambda: (time.sleep(1.2), webbrowser.open(url)), daemon=True).start()
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
+    state.server = server
+    state.port = args.port
+    server.run()
+    sys.exit(state.exit_code)
 
 
 if __name__ == "__main__":

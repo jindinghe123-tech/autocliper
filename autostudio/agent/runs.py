@@ -7,6 +7,8 @@ import time
 import traceback
 from typing import Any, AsyncIterator, Awaitable, Callable
 
+from .. import power
+
 log = logging.getLogger("autostudio.runs")
 
 
@@ -77,6 +79,7 @@ class RunManager:
 
         async def wrapper() -> None:
             notice: dict[str, Any] | None = None     # stopping a run yourself needs no notification
+            power.hold()        # an unattended run must not stop because Windows went to sleep
             try:
                 out = await fn(run)
                 notice = {"type": "run_done", "text": out if isinstance(out, str) else ""}
@@ -87,6 +90,7 @@ class RunManager:
                 await run.emit({"type": "error", "message": str(e) or type(e).__name__})
                 notice = {"type": "run_error", "text": str(e) or type(e).__name__}
             finally:
+                power.release()
                 run.done = True
                 await run.emit({"type": "done"})
                 for q in list(run.subscribers):
@@ -96,6 +100,7 @@ class RunManager:
                 asyncio.get_running_loop().call_later(120, self._cleanup, sid, run)
 
         run.task = asyncio.create_task(wrapper())
+        run.notice({"type": "run_started"})
         return run
 
     def _cleanup(self, sid: str, run: Run) -> None:

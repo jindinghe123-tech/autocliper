@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "AutoStudio"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 DATA_DIR = Path(os.environ.get("AUTOSTUDIO_HOME", Path.home() / ".autostudio")).expanduser()
 SETTINGS_FILE = DATA_DIR / "settings.json"

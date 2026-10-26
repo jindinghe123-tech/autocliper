@@ -77,6 +77,25 @@ CREATE TABLE IF NOT EXISTS social_posts (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_posts_status ON social_posts(status, created_at);
+-- Every file a material folder ever handed to a run, keyed by its content (see scheduler.py), so a file is
+-- used once no matter how many tasks watch the folder, whether it is renamed or copied in again, or the
+-- run that had it crashed. status: claimed (a run has it) | used | retry (its run failed) | failed (gave up)
+CREATE TABLE IF NOT EXISTS materials (
+    fp TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    folder TEXT NOT NULL,
+    stat TEXT,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    task_id TEXT,
+    session_id TEXT,
+    moved_to TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_materials_session ON materials(session_id);
+CREATE INDEX IF NOT EXISTS idx_materials_folder ON materials(folder, status);
 """
 
 # Columns added after the first release: (table, column, definition)
@@ -196,7 +215,7 @@ class DB:
         return self.get_task(tid)
 
     def set_task_seen(self, tid: str, seen: dict[str, Any]) -> None:
-        """The material-folder ledger: which files earlier runs were already given (see scheduler.scan_new)."""
+        """The per-task ledger of versions before 0.2 (read once to fill the shared `materials` ledger)."""
         self._exec("UPDATE tasks SET watch_seen=? WHERE id=?", (json.dumps(seen, ensure_ascii=False), tid))
 
     def delete_task(self, tid: str) -> None:
@@ -220,6 +239,48 @@ class DB:
 
     def list_task_runs(self, tid: str, limit: int = 30) -> list[dict[str, Any]]:
         return self._all("SELECT * FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT ?", (tid, limit))
+
+    # ---- material ledger (scheduler.py) ----------------------------------
+    def get_materials(self, fps: list[str]) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for i in range(0, len(fps), 500):
+            chunk = fps[i:i + 500]
+            rows = self._all(f"SELECT * FROM materials WHERE fp IN ({','.join('?' * len(chunk))})", tuple(chunk))
+            out.update({r["fp"]: r for r in rows})
+        return out
+
+    def material_by_stat(self, path: str, stat: str) -> dict[str, Any] | None:
+        """A file we fingerprinted before and that has not changed since (saves reading it again)."""
+        return self._one("SELECT * FROM materials WHERE path=? AND stat=?", (path, stat))
+
+    def put_material(self, fp: str, **fields: Any) -> None:
+        now = time.time()
+        cols = ("name", "path", "folder", "stat", "status", "attempts", "task_id", "session_id", "moved_to")
+        vals = {k: v for k, v in fields.items() if k in cols}
+        old = self._one("SELECT fp FROM materials WHERE fp=?", (fp,))
+        if old:
+            if vals:
+                sets = ", ".join(f"{k}=?" for k in vals)
+                self._exec(f"UPDATE materials SET {sets}, updated_at=? WHERE fp=?", (*vals.values(), now, fp))
+            return
+        row = {"name": "", "path": "", "folder": "", "stat": None, "status": "used", "attempts": 0, "task_id": None,
+               "session_id": None, "moved_to": None, **vals}
+        self._exec(f"INSERT INTO materials (fp, {', '.join(cols)}, created_at, updated_at) VALUES (?, {', '.join('?' * len(cols))}, ?, ?)",
+                   (fp, *[row[k] for k in cols], now, now))
+
+    def list_materials(self, folder: str | None = None, status: str | None = None, session_id: str | None = None,
+                       limit: int = 500) -> list[dict[str, Any]]:
+        where, args = [], []
+        for col, val in (("folder", folder), ("status", status), ("session_id", session_id)):
+            if val:
+                where.append(f"{col}=?")
+                args.append(val)
+        sql = "SELECT * FROM materials" + (f" WHERE {' AND '.join(where)}" if where else "")
+        return self._all(sql + " ORDER BY updated_at DESC LIMIT ?", (*args, limit))
+
+    def material_counts(self, folder: str) -> dict[str, int]:
+        rows = self._all("SELECT status, COUNT(*) AS n FROM materials WHERE folder=? GROUP BY status", (folder,))
+        return {r["status"]: r["n"] for r in rows}
 
     # ---- social accounts ------------------------------------------------
     # `profile` is public JSON (channel name, avatar…); `secret` holds tokens and never leaves the server.

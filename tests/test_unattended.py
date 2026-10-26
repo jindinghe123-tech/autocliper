@@ -1,4 +1,4 @@
-"""Unattended publishing: a task's material folder, approval notifications on the phone, publish results."""
+"""Unattended publishing: approval notifications on the phone, publish results (material folder: test_materials.py)."""
 import asyncio
 import os
 import tempfile
@@ -51,72 +51,9 @@ def put_file(folder: Path, name: str, data: bytes = b"x" * 2048, mtime: float = 
 # ---------------------------------------------------------------------------
 # material folder
 
-def test_scan_new_files(tmp_path):
-    put_file(tmp_path, "b.mp4", mtime=OLD + 10)
-    put_file(tmp_path, "a.jpg")
-    put_file(tmp_path, "sub/c.mov", mtime=OLD + 20)
-    put_file(tmp_path, "copying.mp4", mtime=time.time())             # still being copied in
-    for junk in ("~$x.docx", ".hidden.mp4", "dl.crdownload", "Thumbs.db", ".git/obj"):
-        put_file(tmp_path, junk)
-    new = sched_mod.scan_new(tmp_path, {})
-    assert [f["rel"] for f in new] == ["a.jpg", "b.mp4", "sub/c.mov"]      # oldest first, junk skipped
-    seen = {f["rel"]: f["key"] for f in new}
-    assert sched_mod.scan_new(tmp_path, seen) == []
-    put_file(tmp_path, "a.jpg", b"edited" * 999)                            # re-exported: new again
-    assert [f["rel"] for f in sched_mod.scan_new(tmp_path, seen)] == ["a.jpg"]
-
-
 def _task(folder: Path, **kw):
     return state.db.create_task(name="素材剪辑", prompt="把新素材剪成短视频发小红书", cron="0 18 * * *",
                                 watch_dir=str(folder), **kw)
-
-
-def test_task_runs_only_on_new_material(ra, tmp_path, monkeypatch):
-    folder = tmp_path / "素材"
-    folder.mkdir()
-    prompts: list[str] = []
-    outcome = {"fail": False}
-
-    async def fake_agent(run, sid, prompt, **kw):
-        prompts.append(prompt)
-        if outcome["fail"]:
-            raise RuntimeError("模型挂了")
-        return "做好了"
-
-    monkeypatch.setattr("autostudio.agent.loop.run_agent", fake_agent)
-    t = _task(folder)
-
-    async def main():
-        state.runs = RunManager(notify=_run_notice)
-        sch = sched_mod.TaskScheduler()
-
-        async def run():
-            r = await sch.run_task(t["id"])
-            if r and r.get("session_id"):
-                await state.runs.wait(r["session_id"])
-            return r
-
-        r = await run()        # empty folder: nothing runs
-        assert r["skipped"] and "没有新文件" in r["message"] and not prompts
-        put_file(folder, "旅行.mp4")
-        put_file(folder, "封面.jpg", mtime=OLD + 5)
-        outcome["fail"] = True
-        r = await run()        # the run fails: the files are not used up...
-        assert r["session_id"] and "旅行.mp4" in prompts[-1] and "封面.jpg" in prompts[-1]
-        outcome["fail"] = False
-        r = await run()        # ...so the next run gets them again
-        assert r["session_id"] and len(prompts) == 2 and str(folder / "旅行.mp4") in prompts[-1]
-        r = await run()        # used: nothing new any more
-        assert r["skipped"] and len(prompts) == 2
-        put_file(folder, "第二天.mp4")
-        r = await run()
-        assert "第二天.mp4" in prompts[-1] and "旅行.mp4" not in prompts[-1]
-
-    asyncio.run(main())
-    runs = state.db.list_task_runs(t["id"])
-    assert [r["status"] for r in reversed(runs)] == ["skipped", "error", "ok", "skipped", "ok"]
-    assert not [e for e in ra.notices.items if e.get("route") == "#/tasks"]     # skipping is not news
-    state.db.delete_task(t["id"])
 
 
 def test_missing_folder_is_reported(ra, tmp_path):
@@ -161,9 +98,18 @@ def test_unattended_publish_asks_on_the_phone(ra, xhs_account, tmp_path):
         return None
 
     ctx = ToolContext(session_id=session["id"], workspace=tmp_path, emit=emit, headless=True, publish_mode="queue")
-    out = asyncio.run(social_publish(ctx, accounts=["小红书"], video=str(video), title="周末去哪儿"))
+    publish = {"accounts": ["小红书"], "video": str(video), "title": "周末去哪儿", "tags": ["周末", "探店", "美食"],
+               "description": "这家店藏在巷子里，周末去正好。"}
+    # nobody is watching: an incomplete post is sent back to the agent instead of waiting on the phone
+    out = asyncio.run(social_publish(ctx, **{**publish, "title": "一个超过二十个字的标题会被小红书截断所以必须重新写", "tags": ["周末"]}))
+    assert out["ok"] is False and not ra.notices.items
+    gaps = " ".join(out["fix_these"])
+    assert "封面" in gaps and "20" in gaps and "话题" in gaps
+    put_file(tmp_path, "封面.jpg")       # what deliver leaves next to 成片.mp4 is picked up by itself
+    out = asyncio.run(social_publish(ctx, **publish))
     assert "手机" in out["message"]
     pid = out["results"][0]["post_id"]
+    assert state.db.get_post(pid)["content"]["cover"] == str(tmp_path / "封面.jpg")
     ev = list(ra.notices.items)[-1]
     assert ev["type"] == "posts_pending" and ev["route"] == f"#/review/{pid}" and ev["pending"] == 1
     assert "周末去哪儿" in ev["text"] and "美食号" in ev["text"]

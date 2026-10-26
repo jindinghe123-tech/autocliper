@@ -5,8 +5,9 @@ import { confirmDialog, h, icon, toast } from "./dom.js";
 import { showFiles } from "./files.js";
 import { disconnectThisPhone, showPhone, stopPhoneView } from "./phone.js";
 import { showSettings } from "./settings.js";
+import { showSetup, stopSetupView } from "./setup.js";
 import { showPublish, showReview, stopPublishView } from "./social.js";
-import { anyProviderReady, emit, inPhoneApp, modelLabel, navigate, on, providerName, refreshSessions, refreshSettings, store } from "./store.js";
+import { anyProviderReady, emit, inPhoneApp, isRemote, modelLabel, navigate, on, providerName, refreshSessions, refreshSettings, store } from "./store.js";
 import { showSubtitles, stopSubtitleView } from "./subtitles.js";
 import { showTasks } from "./tasks.js";
 import { showWorks } from "./works.js";
@@ -108,7 +109,9 @@ async function route() {
   stopSubtitleView();
   stopPublishView();
   stopPhoneView();
+  stopSetupView();
   document.getElementById("sidebar").classList.remove("open");
+  document.getElementById("app").classList.toggle("setup-mode", parts[0] === "setup");
   try {
     switch (parts[0]) {
       case "works": await showWorks(main); break;
@@ -119,6 +122,7 @@ async function route() {
       case "review": await showReview(main, parts[1]); break;
       case "files": await showFiles(main, params); break;
       case "settings": await showSettings(main, parts[1] || "models", params); break;
+      case "setup": await showSetup(main); break;
       default: await showChat(main, parts[1] || null);
     }
   } catch (e) {
@@ -139,7 +143,20 @@ async function boot() {
   }
   buildSidebar();
   window.addEventListener("hashchange", route);
+  // the first time on this PC: the guided setup, which leaves everything running by itself
+  const setup = store.meta.app?.setup;
+  if (!isRemote() && setup && !setup.done && !setup.has_tasks && (!location.hash || location.hash === "#/chat")) location.hash = "#/setup";
   await route();
+  const upd = store.meta.app?.update?.just_updated;
+  if (upd && !isRemote()) {
+    const seen = `updated-${upd.version}`;
+    try {
+      if (!localStorage.getItem(seen)) {
+        localStorage.setItem(seen, "1");
+        toast(`AutoStudio 已自动更新到 ${upd.version}${upd.notes ? "：" + upd.notes : ""}`, "ok");
+      }
+    } catch { /* private mode */ }
+  }
   // keep the "running" dots fresh
   setInterval(() => { if (document.visibilityState === "visible") refreshSessions().catch(() => {}); }, 8000);
   if (!store.meta.ffmpeg?.ffmpeg) toast("未找到 ffmpeg，视频功能不可用。请安装 ffmpeg 或 pip install imageio-ffmpeg。", "err");

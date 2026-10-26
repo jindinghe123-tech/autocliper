@@ -33,7 +33,9 @@ from .providers.catalog import fetch_chatgpt_catalog
 from .providers.chatgpt_auth import chatgpt_auth
 from .remote import (APK_FILE, COOKIE, COOKIE_MAX_AGE, DEVICE_PATHS, NOTICE_MAX_WAIT, PUBLIC_PATHS, PairError,
                      device_label, firewall_fix, firewall_status, remote)
-from .scheduler import TaskScheduler, normalize_watch_dir
+from . import autostart
+from .scheduler import TaskScheduler, material_summary, normalize_watch_dir, retry_failed, watch_dir_path
+from .updater import updater
 from .tools import CATEGORY_LABELS, REGISTRY
 from .media.tts import EDGE_PERSONAS, TTSError, synthesize
 from .tools.creative import EFFECT_NAMES, TRANSITIONS, TTS_VOICES
@@ -84,8 +86,15 @@ async def lifespan(app: FastAPI):
     state.scheduler.start()
     sync_task = asyncio.create_task(_background_model_sync())
     await remote.apply(app)
+    remote.relay.status = _phone_status
+    remote.relay.on_command = _relay_command
+    if state.server is not None:        # a real run (python -m autostudio), not a test client
+        remote.relay.start()
+        updater.start()
     yield
     sync_task.cancel()
+    await updater.stop()
+    await remote.relay.stop()
     await remote.stop()
     state.scheduler.shutdown()
 
@@ -125,6 +134,8 @@ async def local_guard(request: Request, call_next):
         host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
         if not ALLOW_ANY_HOST and host not in LOCAL_HOSTS:
             return JSONResponse({"detail": "forbidden host"}, status_code=403)
+        if request.url.path.startswith("/api/"):
+            state.last_ui_request = time.time()     # updates wait until nobody is using the app
     if request.url.path.startswith("/api/"):
         if request.headers.get("sec-fetch-site") == "cross-site":
             return JSONResponse({"detail": "cross-site request blocked"}, status_code=403)
@@ -171,6 +182,7 @@ async def meta(request: Request) -> dict[str, Any]:
     device = getattr(request.state, "device", None)
     return {
         "version": VERSION,
+        "app": _app_view(),
         "remote": {"device": remote.device_view(device), "pc_name": remote.data["pc_name"]} if device else None,
         "os": f"{platform.system()} {platform.release()}",
         "workspace": str(state.settings.workspace),
@@ -188,6 +200,154 @@ async def meta(request: Request) -> dict[str, Any]:
         "personas": EDGE_PERSONAS,
         "asset_providers": [{"id": k, **v} for k, v in stock.PROVIDERS.items()],
     }
+
+
+def _pc_only(request: Request) -> None:
+    if request.scope.get("autostudio_remote"):
+        raise HTTPException(403, "只能在电脑上操作")
+
+
+def _app_view() -> dict[str, Any]:
+    return {"version": VERSION, "update": updater.view(), "supervised": state.supervised,
+            "autostart": {"supported": autostart.supported(), "enabled": autostart.enabled()},
+            "setup": _setup_view()}
+
+
+@app.get("/api/app")
+async def app_info() -> dict[str, Any]:
+    return _app_view()
+
+
+@app.post("/api/app/update/check")
+async def app_update_check() -> dict[str, Any]:
+    await updater.check(download=updater.can_install())
+    return _app_view()
+
+
+@app.post("/api/app/update/install")
+async def app_update_install(request: Request) -> dict[str, Any]:
+    _pc_only(request)
+    if updater.state != "ready":
+        await updater.check(download=True)
+    if updater.state != "ready":
+        raise HTTPException(400, updater.error or "没有可以安装的新版本")
+    if state.runs and any(not r.done for r in state.runs.runs.values()):
+        raise HTTPException(409, "有任务正在运行，等它做完再更新（空闲时会自动更新）")
+    if not updater.install_now():
+        raise HTTPException(400, "这种运行方式不能自动安装更新：请重新下载安装包")
+    return _app_view()
+
+
+@app.put("/api/app/autostart")
+async def app_autostart(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    _pc_only(request)
+    if not autostart.supported():
+        raise HTTPException(400, "只有用 AutoStudio.bat 安装的 Windows 版本能开机自动启动")
+    try:
+        await asyncio.to_thread(autostart.set_enabled, bool(body.get("enabled")))
+    except OSError as e:
+        raise HTTPException(400, f"没能修改开机启动：{e}") from e
+    return _app_view()
+
+
+@app.post("/api/app/quit")
+async def app_quit(request: Request) -> dict[str, Any]:
+    _pc_only(request)
+    if not state.request_exit(0):
+        raise HTTPException(400, "无法退出")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# first run: one guided pass that leaves everything running by itself (web/js/setup.js)
+
+SETUP_TASK_NAME = "每天自动做小红书视频"
+ABOUT_HEAD = "## 关于我"
+
+
+def _about_text() -> str:
+    text = MEMORY_FILE.read_text("utf-8") if MEMORY_FILE.exists() else ""
+    m = re.search(rf"^{re.escape(ABOUT_HEAD)}\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    return m.group(1).strip() if m else ""
+
+
+def _save_about(about: str) -> None:
+    text = MEMORY_FILE.read_text("utf-8") if MEMORY_FILE.exists() else ""
+    block = f"{ABOUT_HEAD}\n{about.strip()}\n\n"
+    pattern = rf"^{re.escape(ABOUT_HEAD)}\n.*?(?=^## |\Z)"
+    text = re.sub(pattern, lambda _m: block, text, count=1, flags=re.S | re.M) if re.search(pattern, text, re.S | re.M) \
+        else block + text
+    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MEMORY_FILE.write_text(text.strip() + "\n", "utf-8")
+
+
+def _setup_task() -> dict[str, Any] | None:
+    tid = (state.settings.get().get("setup") or {}).get("task_id")
+    return state.db.get_task(tid) if tid else None
+
+
+def _setup_view() -> dict[str, Any]:
+    cfg = state.settings.get().get("setup") or {}
+    task = _setup_task()
+    return {"done": bool(cfg.get("done")), "about": _about_text(), "task": _task_view(task) if task else None,
+            "default_folder": str(autostart.desktop() / "素材"), "has_tasks": bool(state.db.list_tasks())}
+
+
+def setup_prompt(accounts: list[dict[str, Any]]) -> str:
+    names = "、".join(f"「{a['name']}」" for a in accounts)
+    return ("每天我会往素材文件夹里放新拍的视频和照片。请把这次的新素材做成一条小红书视频笔记："
+            "怎么剪、留哪些画面、要不要字幕配音配乐、封面怎么做，都由你决定，目标是让刷到的人愿意看完、愿意找我。"
+            f"做好后发布到我的小红书{names or '账号'}：标题、正文、话题由你来写，用我的口吻（我是谁、做什么，见长期记忆里的「关于我」）。")
+
+
+@app.get("/api/setup")
+async def setup_info() -> dict[str, Any]:
+    return _setup_view()
+
+
+@app.post("/api/setup/finish")
+async def setup_finish(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Save who the user is, create (or update) the daily task, and switch on what makes it run by itself."""
+    _pc_only(request)
+    assert state.scheduler
+    about = str(body.get("about") or "").strip()
+    if about:
+        _save_about(about)
+    hh, mm = (str(body.get("time") or "20:00").split(":") + ["0"])[:2]
+    try:
+        cron = f"{int(mm)} {int(hh)} * * *"
+        state.scheduler.validate_cron(cron)
+    except ValueError as e:
+        raise HTTPException(400, "时间不对，例如 20:00") from e
+    try:
+        folder = normalize_watch_dir(str(body.get("folder") or "") or _setup_view()["default_folder"], state.settings.workspace)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    xhs = [a for a in state.db.list_accounts("xiaohongshu") if not body.get("accounts") or a["id"] in body["accounts"]]
+    fields = {"name": SETUP_TASK_NAME, "prompt": setup_prompt(xhs), "cron": cron, "enabled": True, "watch_dir": folder,
+              "auto_publish": bool(body.get("auto_publish")), "allow_dangerous": bool(body.get("allow_code", True))}
+    task = _setup_task()
+    task = state.db.update_task(task["id"], **fields) if task else state.db.create_task(**fields)
+    assert task
+    state.scheduler.sync(task["id"])
+    state.settings.update({"setup": {"done": True, "task_id": task["id"], "at": time.time()}})
+    done: dict[str, Any] = {"task": _task_view(task), "shortcuts": [], "autostart_on": False}
+    if body.get("autostart", True) and autostart.supported():
+        with contextlib.suppress(OSError):
+            done["autostart_on"] = await asyncio.to_thread(autostart.set_enabled, True)
+    if body.get("shortcuts", True):
+        with contextlib.suppress(Exception):
+            done["shortcuts"] = await asyncio.to_thread(autostart.desktop_shortcuts, Path(folder or ""))
+    if folder:      # open it, so the user sees where to put things
+        with contextlib.suppress(Exception):
+            await reveal({"path": folder})
+    return {**_app_view(), **done}
+
+
+@app.post("/api/setup/skip")
+async def setup_skip() -> dict[str, Any]:
+    state.settings.update({"setup": {"done": True}})
+    return _app_view()
 
 
 @app.get("/api/settings")
@@ -454,6 +614,28 @@ async def run_task_now(tid: str) -> dict[str, Any]:
 @app.get("/api/tasks/{tid}/runs")
 async def task_runs(tid: str) -> list[dict[str, Any]]:
     return state.db.list_task_runs(tid)
+
+
+def _task_folder(tid: str) -> Path:
+    t = state.db.get_task(tid)
+    if not t:
+        raise HTTPException(404, "任务不存在")
+    folder = watch_dir_path(t.get("watch_dir"), state.settings.workspace)
+    if not folder:
+        raise HTTPException(400, "这个任务没有素材文件夹")
+    return folder
+
+
+@app.get("/api/tasks/{tid}/materials")
+async def task_materials(tid: str) -> dict[str, Any]:
+    """How the task's material folder stands: used, waiting for the next run, given up on."""
+    return await asyncio.to_thread(material_summary, _task_folder(tid))
+
+
+@app.post("/api/tasks/{tid}/materials/retry")
+async def task_materials_retry(tid: str) -> dict[str, Any]:
+    folder = _task_folder(tid)
+    return {"ok": True, "count": retry_failed(folder), **(await asyncio.to_thread(material_summary, folder))}
 
 
 # ---------------------------------------------------------------------------
@@ -741,7 +923,8 @@ async def remote_pair(request: Request, body: dict[str, Any] = Body(...)) -> JSO
         raise HTTPException(400, str(e)) from e
     st = remote.status()
     resp = JSONResponse({"token": token, "device": remote.device_view(dev), "pc_id": st["pc_id"],
-                         "pc_name": st["pc_name"], "addresses": st["addresses"], "port": st["port"]})
+                         "pc_name": st["pc_name"], "addresses": st["addresses"], "port": st["port"],
+                         "relay": remote.relay.credentials(dev)})
     resp.set_cookie(COOKIE, token, max_age=COOKIE_MAX_AGE, httponly=True, samesite="strict", path="/")
     return resp
 
@@ -756,6 +939,10 @@ def _run_notice(sid: str, ev: dict[str, Any]) -> None:
     """Turn a run's lifecycle into phone notifications (see remote.Notices)."""
     sess = state.db.get_session(sid) or {}
     task = sess.get("kind") == "task"
+    if ev["type"] == "run_started":     # not news, but a phone away from home should start listening
+        if task:
+            remote.relay.push_status()
+        return
     if ev["type"] in ("run_done", "run_error") and not task and ev.get("seconds", 0) < NOTIFY_MIN_SECONDS:
         return
     if ev["type"] == "approval_needed":
@@ -778,10 +965,49 @@ async def remote_events(after: int | None = None, boot: str = "", wait: int = 0)
     Call without `after` first to learn where the feed is, then pass back `boot` and `cursor` each time.
     """
     events, cursor = await remote.notices.wait(after, boot, min(max(wait, 0), NOTICE_MAX_WAIT))
+    # `pending`: posts waiting for approval right now, so a phone can show (or clear) their notification
+    # even if it missed the news, e.g. because this PC restarted in between
+    pending = [social.post_brief(p) for p in state.db.list_posts("pending", 20)]
+    return {"boot": remote.notices.boot, "cursor": cursor, "events": events, **_phone_status(), "pending": pending}
+
+
+def _phone_status() -> dict[str, Any]:
     active = sum(1 for r in state.runs.runs.values() if not r.done) if state.runs else 0
     active += len(social.PROGRESS)      # a publish going on: its result is worth staying for
     nxt = state.scheduler.seconds_to_next() if state.scheduler and state.scheduler.sched.running else None
-    return {"boot": remote.notices.boot, "cursor": cursor, "events": events, "active": active, "next_task_in": nxt}
+    return {"active": active, "next_task_in": nxt, "pending_ids": [p["id"] for p in state.db.list_posts("pending", 50)]}
+
+
+async def _relay_command(device: dict[str, Any], msg: dict[str, Any]) -> None:
+    """A phone away from home answered through the relay (see relay.py)."""
+    kind, pid = msg.get("t"), str(msg.get("post") or "")
+    post = state.db.get_post(pid) if pid else None
+    log.info("relay: %s from %s for %s", kind, device.get("name"), pid or "-")
+    if kind == "approve" and post and post["status"] == "pending":
+        social.publish_in_background(pid)
+    elif kind == "cancel" and post and post["status"] == "pending":
+        state.db.update_post(pid, status="cancelled")
+        remote.relay.push_status()
+    elif kind == "sync":        # back after a long time away: what is waiting right now?
+        pending = state.db.list_posts("pending", 20)
+        if pending:
+            sid = pending[0].get("session_id") or ""
+            remote.relay.notify_raw({"t": "notice", "ev": {"type": "posts_pending", "session_id": sid, "title": "等你确认",
+                                                           "ts": time.time(), "id": 0, **social.pending_notice(sid, pending)}})
+        else:
+            remote.relay.push_status()
+
+
+@app.get("/api/remote/relay")
+async def remote_relay_credentials(request: Request) -> dict[str, Any]:
+    """A paired phone (on the local network) gets fresh mailbox credentials for when it is away."""
+    device = getattr(request.state, "device", None)
+    if not device:
+        raise HTTPException(400, "请在手机上打开")
+    creds = remote.relay.credentials(device)
+    if not creds:
+        raise HTTPException(404, "这台电脑没有开启中转（缺少 cryptography 组件）")
+    return creds
 
 
 @app.get("/api/remote/whoami")
@@ -805,6 +1031,26 @@ async def remote_logout(request: Request) -> JSONResponse:
 @app.get("/pair", response_class=HTMLResponse)
 async def pair_page() -> HTMLResponse:
     return HTMLResponse((WEB_DIR / "pair.html").read_text("utf-8"), headers={"Cache-Control": "no-cache"})
+
+
+_apk_info: dict[str, Any] = {}
+
+
+@app.get("/api/remote/app-update")
+async def remote_app_update() -> dict[str, Any]:
+    """The Android app checks this to update itself from the PC (the PC gets the newest APK with its own updates)."""
+    if not APK_FILE.is_file():
+        raise HTTPException(404, "这个版本没有附带安卓 App")
+    st = APK_FILE.stat()
+    key = f"{st.st_size}:{st.st_mtime_ns}"
+    if _apk_info.get("key") != key:
+        meta_file = APK_FILE.with_name("apk.json")
+        info = json.loads(meta_file.read_text("utf-8")) if meta_file.is_file() else {}
+        digest = await asyncio.to_thread(lambda: hashlib.sha256(APK_FILE.read_bytes()).hexdigest())
+        _apk_info.clear()
+        _apk_info.update(key=key, version_code=int(info.get("version_code") or 0), version_name=info.get("version_name") or "",
+                         sha256=digest, size=st.st_size, url="/download/AutoStudio.apk")
+    return {k: v for k, v in _apk_info.items() if k != "key"}
 
 
 @app.get("/download/AutoStudio.apk")

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DATA_DIR
+from .relay import Relay
 
 log = logging.getLogger("autostudio.remote")
 
@@ -45,7 +46,8 @@ NOTICE_MAX_WAIT = 55              # longest long-poll, under the idle timeout of
 PUBLIC_PATHS = {"/pair", "/api/remote/hello", "/api/remote/pair", "/download/AutoStudio.apk",
                 "/manifest.webmanifest", "/favicon.ico"}
 # Remote-management endpoints a paired phone may use (everything else under /api/remote is PC-only).
-DEVICE_PATHS = {"/api/remote/whoami", "/api/remote/logout", "/api/remote/events"}
+DEVICE_PATHS = {"/api/remote/whoami", "/api/remote/logout", "/api/remote/events", "/api/remote/relay",
+                "/api/remote/app-update"}
 CGNAT = ipaddress.ip_network("100.64.0.0/10")   # Tailscale / ZeroTier style overlay networks
 
 
@@ -161,6 +163,7 @@ class Notices:
         self.cursor = 0
         self._lock = threading.Lock()
         self._waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Future]] = set()
+        self.listener: Any = None       # also told about every notification (relay.Relay.notify)
 
     def publish(self, ev: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -171,6 +174,11 @@ class Notices:
         for loop, fut in waiters:       # waiters may sit in another thread's loop (tests, a second server)
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(_wake, fut)
+        if self.listener:
+            try:
+                self.listener(ev)
+            except Exception:  # noqa: BLE001 - phones away from home just miss this one
+                log.warning("notice listener failed", exc_info=True)
         return ev
 
     def _since(self, after: int | None, boot: str) -> list[dict[str, Any]]:
@@ -207,6 +215,8 @@ class RemoteAccess:
         self.notices = Notices()
         self._lock = threading.Lock()
         self.data = self._load()
+        self.relay = Relay(self)
+        self.notices.listener = self.relay.notify
         self._code: dict[str, Any] | None = None
         self._server: Any = None
         self._task: asyncio.Task | None = None
@@ -267,6 +277,7 @@ class RemoteAccess:
         self.data["devices"] = [d for d in self.data["devices"] if d["id"] != device_id]
         if len(self.data["devices"]) != before:
             self.save()
+            self.relay.changed()
             return True
         return False
 
@@ -376,7 +387,7 @@ class RemoteAccess:
                 "port": port, "pc_id": self.data["pc_id"], "pc_name": self.data["pc_name"], "addresses": addrs,
                 "devices": sorted((self.device_view(d) for d in self.data["devices"]),
                                   key=lambda d: -(d.get("last_seen") or 0)),
-                "apk": APK_FILE.is_file()}
+                "apk": APK_FILE.is_file(), "relay": self.relay.view()}
 
 
 remote = RemoteAccess()

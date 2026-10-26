@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "autostudio"
-version = "0.1.0"
+version = "0.2.0"
 description = "开源 AI Agent 工作台：用 ChatGPT 订阅或任意大模型 API，帮你转字幕、剪视频、跑每日自动任务。"
 readme = "README.md"
 license = "MIT"
@@ -20,6 +20,7 @@ dependencies = [
   "numpy>=1.24",
   "pillow>=10",
   "segno>=1.6",
+  "cryptography>=42",
 ]
 
 [project.urls]

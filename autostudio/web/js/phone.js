@@ -189,7 +189,10 @@ async function renderOnPc(body) {
           } catch (e) { toast(e.message, "err"); }
         } }, "保存")),
       h("div", { class: "hint small muted", style: { marginTop: "10px" } },
-        "不在家也想用？在电脑和手机上都装好 Tailscale 并登录同一个账号，上面的地址里会多出一个 100.x 开头的地址，在外面用它就能连。"));
+        st.relay?.enabled
+          ? `不在家（手机用流量）也能收到「做好了，等你确认」的通知，点「同意」就能发布：消息经过 AutoStudio 网站上的加密中转，只有这台电脑和你的手机能解开。${st.relay.error ? `（中转暂时连不上：${st.relay.error}）` : ""}`
+          : "不在家时手机收不到通知（缺少加密组件 cryptography，重新双击 AutoStudio.bat 会自动安装）。",
+        " 想在外面也能看完整视频、用全部功能？在电脑和手机上都装好 Tailscale 并登录同一个账号，上面会多出一个 100.x 开头的地址，在外面用它就能连。"));
   }
 
   draw();

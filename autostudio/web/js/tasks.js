@@ -97,7 +97,7 @@ function taskForm(initial, onSaved) {
       h("div", { class: "hint" }, "到点后 Agent 会以这段话为指令自动执行（无人值守，不会提问），可以使用所有工具。")),
     h("div", { class: "field" }, h("label", {}, "执行时间"), h("div", { class: "row wrap" }, preset, dow, time, cron), preview),
     h("div", { class: "field" }, h("label", {}, "素材文件夹"), watch,
-      h("div", { class: "hint" }, "填了以后，每次只把上次之后新放进去的文件交给 Agent；没有新文件就不运行，也不会打扰你。第一次运行会处理文件夹里已有的文件。")),
+      h("div", { class: "hint" }, "填了以后，每次只把新放进去的文件交给 Agent；做完后它们会挪进文件夹里的「已用过」，同一个视频（哪怕改了名、又拷进来一次）不会被做第二次。没有新文件就不运行，也不会打扰你。")),
     h("div", { class: "field" }, h("label", {}, "模型"), modelSel),
     h("div", { class: "field" }, h("label", {}, "结果推送 Webhook"), webhook,
       h("div", { class: "hint" }, "自动识别：飞书 / 钉钉 / 企业微信 / Telegram / Discord / Slack / Server酱 / Bark / ntfy，其它地址按通用 JSON 推送。")),
@@ -124,6 +124,24 @@ function taskForm(initial, onSaved) {
   });
 }
 
+// how the material folder stands: waiting for the next run, used, given up on
+function materialsLine(t) {
+  const line = h("div", { class: "mat-line" }, h("span", {}, "素材：…"));
+  const draw = (m) => {
+    line.innerHTML = "";
+    line.append(...[
+      h("span", {}, iconEl("folder"), ` 等待处理 ${m.waiting} 个`),
+      h("span", {}, `已用过 ${m.used} 个`),
+      m.running ? h("span", { class: "tag accent" }, `正在处理 ${m.running} 个`) : null,
+      m.failed ? h("span", { class: "tag err", title: m.failed_files.map((f) => f.name).join("、") }, `${m.failed} 个试了几次都没做成`) : null,
+      m.failed ? h("a", { href: "javascript:void 0", onclick: async () => { draw(await post(`/api/tasks/${t.id}/materials/retry`)); toast("下次运行会重新处理它们", "ok"); } }, "重新处理") : null,
+      h("a", { href: "javascript:void 0", onclick: () => post("/api/files/reveal", { path: m.folder }).catch((e) => toast(e.message, "err")) }, "打开文件夹"),
+    ].filter(Boolean));
+  };
+  get(`/api/tasks/${t.id}/materials`).then(draw, () => line.remove());
+  return line;
+}
+
 export async function showTasks(main) {
   main.innerHTML = "";
   const body = h("div", { class: "page-narrow" });
@@ -139,7 +157,7 @@ export async function showTasks(main) {
     try { tasks = await get("/api/tasks"); } catch (e) { toast(e.message, "err"); return; }
     body.innerHTML = "";
     body.append(h("p", { class: "muted", style: { marginTop: 0 } },
-      "让 Agent 按计划自动干活：定时抓取资讯、批量处理新素材、生成报告并推送到你的群聊。AutoStudio 需要保持运行，任务才会按时执行（错过 1 小时内会自动补跑）。"));
+      "让 Agent 按计划自动干活：定时抓取资讯、批量处理新素材、生成报告并推送到你的群聊。AutoStudio 开着才会按时执行；电脑睡着或关机错过了，当天开机后会自动补做。"));
     const templates = () => h("div", { class: "suggest templates" }, TEMPLATES.map((tp) =>
       h("button", { class: "s", onclick: () => taskForm({ ...tp, enabled: true, isTemplate: true }, render) },
         h("div", { class: "ico", html: icon(tp.icon) }),
@@ -174,6 +192,7 @@ export async function showTasks(main) {
           t.watch_dir ? h("span", { class: "tag", title: t.watch_dir }, iconEl("folder"), " " + t.watch_dir.split(/[\\/]/).pop()) : null,
           t.model ? h("span", { class: "tag" }, t.model) : null),
         h("div", { class: "prompt" }, t.prompt),
+        t.watch_dir ? materialsLine(t) : null,
         h("div", { class: "row wrap" },
           h("button", { class: "btn sm", html: icon("play") + "立即运行", onclick: async () => {
             try {

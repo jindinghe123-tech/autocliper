@@ -10,3 +10,4 @@ gradlew text eol=lf
 *.apk binary
 *.jar binary
 android/ export-ignore
+relay/ export-ignore

@@ -574,8 +574,72 @@ function renderAssets(body) {
     } }, "保存"))));
 }
 
+// updates, starting with Windows, the setup wizard, quitting
+function appCard() {
+  const card = h("div", { class: "card" }, h("h3", {}, "更新与启动"));
+  const box = h("div");
+  card.append(box);
+  const STATE = { idle: "", checking: "正在检查…", latest: "已经是最新版", available: "有新版本", downloading: "正在下载新版本…",
+    ready: "新版本已下载好，空闲时会自动更新", error: "检查更新失败", restarting: "正在重启更新…" };
+  async function draw(a) {
+    a = a || await get("/api/app");
+    store.meta.app = a;
+    const u = a.update;
+    box.innerHTML = "";
+    const auto = h("input", { type: "checkbox", checked: u.auto });
+    auto.onchange = async () => { await put("/api/settings", { update: { auto: auto.checked } }); toast("已保存", "ok"); };
+    const check = h("button", { class: "btn sm", html: icon("refresh") + "检查更新", onclick: async () => {
+      check.disabled = true; check.innerHTML = '<div class="spinner"></div>检查中';
+      try { draw(await post("/api/app/update/check")); } catch (e) { toast(e.message, "err"); draw(); }
+    } });
+    const install = h("button", { class: "btn sm primary", html: icon("download") + "立即更新", onclick: async () => {
+      install.disabled = true; install.innerHTML = '<div class="spinner"></div>正在更新';
+      try {
+        await post("/api/app/update/install");
+        toast("正在重启并更新，十几秒后会自动刷新", "ok");
+        setTimeout(function wait() { get("/api/meta").then(() => location.reload(), () => setTimeout(wait, 2000)); }, 6000);
+      } catch (e) { toast(e.message, "err"); draw(); }
+    } });
+    let line = STATE[u.state] || "";
+    if (u.latest && ["available", "ready", "downloading"].includes(u.state)) line = `${line}：${u.latest}${u.notes ? " · " + u.notes : ""}`;
+    if (u.state === "error") line += `（${u.error}）`;
+    if (u.checkout) line = "开发版（git 仓库）：用 git pull 更新" + (u.latest && u.state === "available" ? `，网站上已有 ${u.latest}` : "");
+    else if (!u.can_install && u.state === "available") line += "：双击 AutoStudio.bat 启动的版本才能自动安装，请重新下载";
+    box.append(
+      h("div", { class: "app-row" }, h("div", { class: "grow" }, h("b", {}, `当前版本 ${a.version}`), h("span", { class: "small muted" }, line || "每隔几个小时自动检查一次")),
+        u.state === "ready" && u.can_install ? install : check),
+      h("div", { class: "app-row" }, h("div", { class: "grow" }, h("b", {}, "自动更新"),
+        h("span", { class: "small muted" }, "有新版本就自动下载，等没有任务在跑、也没人在用的时候自动装好，手机 App 也会跟着更新")),
+        h("label", { class: "switch" }, auto, h("span"))));
+    if (a.autostart.supported) {
+      const sw = h("input", { type: "checkbox", checked: a.autostart.enabled });
+      sw.onchange = async () => {
+        try { draw(await put("/api/app/autostart", { enabled: sw.checked })); toast(sw.checked ? "已设为开机自动运行" : "已关闭开机自动运行", "ok"); }
+        catch (e) { toast(e.message, "err"); draw(); }
+      };
+      box.append(h("div", { class: "app-row" }, h("div", { class: "grow" }, h("b", {}, "开机自动运行"),
+        h("span", { class: "small muted" }, "登录 Windows 后在后台启动（没有窗口），定时任务照常运行")), h("label", { class: "switch" }, sw, h("span"))));
+    }
+    box.append(h("div", { class: "app-row" }, h("div", { class: "grow" }, h("b", {}, "设置向导"),
+      h("span", { class: "small muted" }, "重新走一遍：介绍自己、小红书账号、素材文件夹、每天几点做、连手机")),
+      h("button", { class: "btn sm", html: icon("wand") + "打开向导", onclick: () => navigate("#/setup") })));
+    if (a.supervised) {
+      box.append(h("div", { class: "app-row" }, h("div", { class: "grow" }, h("b", {}, "退出 AutoStudio"),
+        h("span", { class: "small muted" }, "退出后定时任务不会运行，直到下次双击 AutoStudio.bat 或重新开机")),
+        h("button", { class: "btn sm danger", html: icon("logout") + "退出", onclick: async () => {
+          if (!(await confirmDialog("退出 AutoStudio？退出后定时任务不会运行。", { danger: true, okText: "退出" }))) return;
+          await post("/api/app/quit").catch(() => {});
+          document.getElementById("main").innerHTML = '<div class="empty">AutoStudio 已退出。双击 AutoStudio.bat 可以再打开。</div>';
+        } })));
+    }
+  }
+  draw(store.meta?.app);
+  return card;
+}
+
 async function renderGeneral(body) {
   body.innerHTML = "";
+  if (!store.meta?.remote) body.append(appCard());
   const s = store.settings;
   const ff = store.meta?.ffmpeg || {};
   const ws = h("input", { class: "input mono", value: s.workspace });

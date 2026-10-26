@@ -13,7 +13,9 @@ $ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 try { $Host.UI.RawUI.WindowTitle = 'AutoStudio' } catch {}
 
-$AppArgs = @($args)
+# --setup-only: install / update packages and stop (launcher.py runs this after an update changed them)
+$SetupOnly = $false
+$AppArgs = @($args | Where-Object { if ($_ -eq '--setup-only') { $script:SetupOnly = $true; $false } else { $true } })
 $SetupVersion = 1          # bump to force every install to re-run the setup once
 $PythonVersion = '3.12'
 $Root = Split-Path -Parent $PSScriptRoot
@@ -50,16 +52,29 @@ function Test-PortOpen([int]$port) {
   try { return $c.ConnectAsync('127.0.0.1', $port).Wait(400) -and $c.Connected } catch { return $false } finally { $c.Close() }
 }
 
-if ($AppArgs.Count -eq 0) {
-  foreach ($p in 8765..8769) {
+$DataDir = if ($env:AUTOSTUDIO_HOME) { $env:AUTOSTUDIO_HOME } else { Join-Path $HOME '.autostudio' }
+$ServerFile = Join-Path $DataDir 'server.json'    # written by autostudio\launcher.py: where the app is listening
+
+function Get-RunningUrl {
+  if (Test-Path -LiteralPath $ServerFile) {
+    try {
+      $u = (Get-Content -LiteralPath $ServerFile -Raw | ConvertFrom-Json).url
+      if ($u -and ((Get-Local "$u/") -match 'AutoStudio')) { return $u }
+    } catch {}
+  }
+  foreach ($p in 8765..8779) {
     if (-not (Test-PortOpen $p)) { continue }
-    $isUs = $false
-    try { $isUs = (Get-Local "http://127.0.0.1:$p/") -match 'AutoStudio' } catch {}
-    if ($isUs) {
-      Say "AutoStudio 已经在运行，正在打开 http://127.0.0.1:$p" 'Green'
-      Start-Process "http://127.0.0.1:$p"
-      exit 0
-    }
+    try { if ((Get-Local "http://127.0.0.1:$p/") -match 'AutoStudio') { return "http://127.0.0.1:$p" } } catch {}
+  }
+  return $null
+}
+
+if ($AppArgs.Count -eq 0 -and -not $SetupOnly) {
+  $running = Get-RunningUrl
+  if ($running) {
+    Say "AutoStudio 已经在运行，正在打开 $running" 'Green'
+    Start-Process $running
+    exit 0
   }
 }
 
@@ -79,20 +94,31 @@ function Test-VenvPython {
 function Start-App {
   # Undo the download proxy settings so the app itself runs with the user's normal environment.
   foreach ($k in $script:SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $script:SavedEnv[$k], 'Process') }
-  $port = 8765
-  $extra = @()
-  if ($AppArgs.Count -eq 0) {
-    while ($port -lt 8780 -and (Test-PortOpen $port)) { $port++ }
-    if ($port -ne 8765) {
-      Say "端口 8765 被其他程序占用，改用 $port" 'Yellow'
-      $extra = @('--port', "$port")
-    }
+  if ($SetupOnly) { exit 0 }
+  if ($AppArgs.Count -gt 0) {
+    # Advanced use (--host, --port …): run in this window, as earlier versions did.
+    & $VPy -m autostudio @AppArgs
+    exit $LASTEXITCODE
   }
+  # Normal start: AutoStudio runs in the background (autostudio\launcher.py keeps it going, installs updates
+  # and restarts it), so this window can close; it only opens the browser once the app answers.
+  $VPyW = Join-Path $VenvDir 'Scripts\pythonw.exe'
+  if (-not (Test-Path -LiteralPath $VPyW)) { $VPyW = $VPy }
+  Start-Process -FilePath $VPyW -ArgumentList @("`"$(Join-Path $Root 'autostudio\launcher.py')`"") -WorkingDirectory $Root
   Write-Host ''
-  Say '  AutoStudio 正在启动，浏览器会自动打开。' 'Green'
-  Say '  使用期间请保持这个窗口打开；关闭窗口即可退出。' 'DarkGray'
-  & $VPy -m autostudio @extra @AppArgs
-  exit $LASTEXITCODE
+  Say '  AutoStudio 正在启动…'
+  $url = $null
+  for ($i = 0; $i -lt 120 -and -not $url; $i++) {
+    Start-Sleep -Milliseconds 500
+    $url = Get-RunningUrl
+  }
+  if (-not $url) { Fail "AutoStudio 没有启动起来。日志在 $(Join-Path $DataDir 'logs')" }
+  Start-Process $url
+  Say "  AutoStudio 已经在后台运行：$url" 'Green'
+  Say '  这个窗口可以关掉了。以后开机会自动启动（第一次打开时的设置向导里可以选），' 'DarkGray'
+  Say '  想打开界面，双击 AutoStudio.bat 或桌面上的 AutoStudio 图标就行。' 'DarkGray'
+  Start-Sleep -Seconds 4
+  exit 0
 }
 
 $script:SavedEnv = @{}

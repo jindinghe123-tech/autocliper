@@ -98,6 +98,17 @@
     .switch:checked { background: var(--accent); border-color: transparent; }
     .switch:checked::after { transform: translateX(18px); background: #fff; }
     .hidden { display: none !important; }
+
+    /* videos waiting for approval, answered without the PC's own pages (away from home) */
+    .post { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; margin-bottom: 12px; }
+    .post img { display: block; width: 100%; max-height: 360px; object-fit: cover; background: #000; }
+    .post .body { padding: 14px 16px 16px; }
+    .post .t { font-weight: 700; font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
+    .post .acc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .post .desc { color: var(--text-2); font-size: 13.5px; margin-top: 8px; white-space: pre-wrap; max-height: 9.5em; overflow: hidden; overflow-wrap: anywhere; }
+    .post .tags { color: var(--accent-2); font-size: 12.5px; margin-top: 6px; }
+    .post .btns { display: grid; gap: 8px; margin-top: 14px; }
+    .post .done { margin-top: 12px; font-size: 13.5px; }
   </style>
 </head>
 <body>
@@ -107,6 +118,11 @@
     <p class="lead">AutoStudio 在电脑上运行。手机连上电脑后，就能远程发任务、看进度、看做好的视频，界面和电脑上一样。</p>
 
     <div id="notice" class="hidden"></div>
+
+    <div id="offline" class="hidden">
+      <div class="section">等你确认的视频</div>
+      <div id="offline-list"></div>
+    </div>
 
     <div id="mine" class="hidden">
       <div class="section">我的电脑</div>
@@ -246,6 +262,7 @@
     function remove(pc) {
       if (!confirm(`从列表里移除「${pc.pc_name}」？\n（要在电脑上的「手机连接」里把这台手机也断开，才会彻底失效）`)) return;
       pcs = pcs.filter((x) => x !== pc);
+      N.forgetPc(pc.pc_id);
       savePcs();
     }
 
@@ -273,8 +290,52 @@
         if (r.status === 401) return revoked(pc);
       }
       busy(null);
-      notice(`连不上「${pc.pc_name}」。请检查：① 电脑上的 AutoStudio 开着；② 电脑上「手机连接」的开关是打开的；③ 手机和电脑连的是同一个 Wi-Fi；④ 电脑上的 Windows 防火墙允许了 Python（第一次打开「手机连接」时弹出的提示要点「允许」）。`,
+      if (showOffline(pc)) {
+        notice(`现在连不上「${pc.pc_name}」的完整界面（手机不在家里的 Wi-Fi 上，或者电脑关着）。等你确认的视频在下面，直接点「同意发布」就行，电脑收到后会自己发出去。`,
+          "warn", [["重试连接", () => connect(pc)]]);
+        return;
+      }
+      notice(`连不上「${pc.pc_name}」。请检查：① 电脑上的 AutoStudio 开着；② 电脑上「手机连接」的开关是打开的；③ 手机和电脑连的是同一个 Wi-Fi；④ 电脑上的 Windows 防火墙允许了 Python（第一次打开「手机连接」时弹出的提示要点「允许」）。` +
+        (N.hasRelay(pc.pc_id) ? " 不在家时，做好的视频会通过通知发给你，在通知上点「同意发布」就行。" : ""),
         "err", [["重试", () => connect(pc)], ["扫码重新连接", scan]]);
+    }
+
+    // ---- videos waiting for approval, as the phone last heard (works away from home, through the relay)
+    function showOffline(pc) {
+      let posts = [];
+      try { posts = JSON.parse(N.offlinePosts(pc.pc_id) || "[]"); } catch (e) { posts = []; }
+      const list = $("offline-list");
+      list.innerHTML = "";
+      $("offline").classList.toggle("hidden", !posts.length);
+      for (const p of posts) {
+        const status = h("div", { class: "done" });
+        const yes = h("button", { class: "btn primary big" }, "同意发布");
+        const no = h("button", { class: "btn ghost" }, "不发了");
+        const answer = async (approve) => {
+          yes.disabled = no.disabled = true;
+          status.textContent = approve ? "正在告诉电脑…" : "正在告诉电脑不发了…";
+          const r = await call("decide", pc.pc_id, p.id, approve);
+          const msg = {
+            direct: approve ? "✅ 电脑开始发布了，发好会通知你。" : "已取消，不发了。",
+            relay: approve ? "✅ 已同意。电脑收到后（一般不超过半分钟）就会开始发布，发好会通知你。" : "已告诉电脑不发了。",
+            gone: "这条已经处理过了（可能已经在电脑上发布或取消）。",
+          }[r.result];
+          status.textContent = msg || "❌ 没送到电脑：手机现在可能没有网络。稍后再试。";
+          if (!msg) yes.disabled = no.disabled = false;
+          else { yes.classList.add("hidden"); no.classList.add("hidden"); }
+        };
+        yes.onclick = () => answer(true);
+        no.onclick = () => { if (confirm("这条视频不发了？")) answer(false); };
+        list.append(h("div", { class: "post" },
+          p.cover ? h("img", { src: p.cover, alt: "" }) : null,
+          h("div", { class: "body" },
+            h("div", { class: "t" }, p.title || "新视频"),
+            p.account ? h("div", { class: "acc" }, "发到 " + p.account) : null,
+            p.description ? h("div", { class: "desc" }, p.description) : null,
+            (p.tags || []).length ? h("div", { class: "tags" }, p.tags.map((t) => "#" + t).join(" ")) : null,
+            h("div", { class: "btns" }, yes, no), status)));
+      }
+      return posts.length > 0;
     }
 
     function enter(pc, base, who) {
@@ -285,6 +346,7 @@
       savePcs();
       busy(null);
       notice(null);
+      $("offline").classList.add("hidden");
       N.open(base, pc.token, pc.pc_id, pc.pc_name);
     }
 
@@ -311,6 +373,7 @@
       let pc = pcs.find((x) => x.pc_id === d.pc_id);
       if (!pc) { pc = { pc_id: d.pc_id }; pcs.push(pc); }
       Object.assign(pc, { pc_name: d.pc_name, token: d.token, base, paired_at: Date.now() });
+      if (d.relay) N.saveRelay(d.pc_id, JSON.stringify(d.relay));     // for news and answers away from home
       enter(pc, base, { pc_name: d.pc_name, port: d.port, addresses: d.addresses });
       return { ok: true };
     }
@@ -416,6 +479,7 @@
       } else if (ev.type === "unreachable") {
         notice(`和「${ev.pc_name}」的连接断开了：电脑可能关机了、AutoStudio 退出了，或者手机换了网络。`, "err",
           pc && pc.token ? [["重新连接", () => connect(pc)]] : []);
+        if (pc) showOffline(pc);
       } else {
         notice(null);
       }

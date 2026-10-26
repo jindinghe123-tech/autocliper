@@ -170,7 +170,7 @@ def test_runs_notify_done_error_and_approvals():
     asyncio.run(main())
     assert ("s1", "approval_needed") in heard and ("s1", "approval_resolved") in heard
     assert ("s1", "run_done") in heard and ("s2", "run_error") in heard
-    assert not [h for h in heard if h[0] == "s3"]      # stopping a run yourself is not news
+    assert not [h for h in heard if h[0] == "s3" and h[1] != "run_started"]      # stopping a run yourself is not news
 
 
 def test_run_notice_skips_quick_chats(ra):
